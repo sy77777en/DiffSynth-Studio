@@ -86,7 +86,7 @@ class MLPActionEncoder(ActionEncoder):
     
     def __init__(self, action_dim: int, embed_dim: int, num_layers: int = 2):
         super().__init__()
-        layers: list[nn.Module] = [nn.linear(action_dim, embed_dim), nn.GELU()]
+        layers: list[nn.Module] = [nn.Linear(action_dim, embed_dim), nn.GELU()]
         for _ in range(num_layers - 2):
             layers += [nn.Linear(embed_dim, embed_dim), nn.GELU()]
         self.mlp = nn.Sequential(*layers)

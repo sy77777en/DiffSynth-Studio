@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from abc import ABC
-from .encoders import ActionEncoder
+from .encoder import ActionEncoder
 
 
 class BaseInjector(nn.Module, ABC):
