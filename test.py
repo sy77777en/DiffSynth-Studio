@@ -164,18 +164,18 @@ print("[Check] T_action:", actions_in.shape[1])
 print("[Check] T_masked:", masked_emb_in.shape[1])
 print("[Check] num_frames:", 20)
 
-# -----------------------------
-# 6) 运行
-# -----------------------------
-video = pipe(
-    actions=actions_in,
-    obs_image_emb=obs_emb_in,
-    masked_image_emb_seq=masked_emb_in,
-    num_frames=20,
-    height=480,
-    width=832,
-    num_inference_steps=30,
-    seed=123,
-    output_type="quantized",
-)
-print("[Done] type(video)=", type(video), "len(video)=", len(video))
+# # -----------------------------
+# # 6) 运行
+# # -----------------------------
+# video = pipe(
+#     actions=actions_in,
+#     obs_image_emb=obs_emb_in,
+#     masked_image_emb_seq=masked_emb_in,
+#     num_frames=20,
+#     height=480,
+#     width=832,
+#     num_inference_steps=30,
+#     seed=123,
+#     output_type="quantized",
+# )
+# print("[Done] type(video)=", type(video), "len(video)=", len(video))
