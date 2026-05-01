@@ -27,6 +27,7 @@ class ActionConditioningConfig:
     obs_injection: Optional[Literal["input_concat", "cross_attn"]] = "input_concat"
     traj_injection: Optional[Literal["input_concat", "cross_attn"]] = None
     history_injection: Optional[Literal["input_concat"]] = None
+    history_frames: int = 3
 
     # Optional fallback weight path (debug only)
     vae_path: Optional[str] = None

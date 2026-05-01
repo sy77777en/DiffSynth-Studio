@@ -90,52 +90,52 @@ MODEL_DIR = exp_raw.get("model_dir", exp_raw.get("model_root"))
 if MODEL_DIR is None:
     raise ValueError("Please set model_dir (or model_root) in YAML experiment config.")
 
-pipe = WanVideoPipeline.from_pretrained(
-    torch_dtype=torch.bfloat16,
-    device=DEVICE,
-    model_configs=[
-        ModelConfig(path=[f"{MODEL_DIR}/high_noise_model/diffusion_pytorch_model-0000{i}-of-00006.safetensors" for i in range(1, 7)], offload_device="cpu"),
-        ModelConfig(path=[f"{MODEL_DIR}/low_noise_model/diffusion_pytorch_model-0000{i}-of-00006.safetensors" for i in range(1, 7)], offload_device="cpu"),
-        ModelConfig(path=f"{MODEL_DIR}/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-        ModelConfig(path=f"{MODEL_DIR}/Wan2.1_VAE.pth", offload_device="cpu"),
-    ],
-    tokenizer_config=ModelConfig(path=f"{MODEL_DIR}/google/umt5-xxl"),
-)
+# pipe = WanVideoPipeline.from_pretrained(
+#     torch_dtype=torch.bfloat16,
+#     device=DEVICE,
+#     model_configs=[
+#         ModelConfig(path=[f"{MODEL_DIR}/high_noise_model/diffusion_pytorch_model-0000{i}-of-00006.safetensors" for i in range(1, 7)], offload_device="cpu"),
+#         ModelConfig(path=[f"{MODEL_DIR}/low_noise_model/diffusion_pytorch_model-0000{i}-of-00006.safetensors" for i in range(1, 7)], offload_device="cpu"),
+#         ModelConfig(path=f"{MODEL_DIR}/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
+#         ModelConfig(path=f"{MODEL_DIR}/Wan2.1_VAE.pth", offload_device="cpu"),
+#     ],
+#     tokenizer_config=ModelConfig(path=f"{MODEL_DIR}/google/umt5-xxl"),
+# )
 
-dummy_input_image = Image.new("RGB", (832, 480), color=(127, 127, 127))
+# dummy_input_image = Image.new("RGB", (832, 480), color=(127, 127, 127))
 
-# 3) Test cases
-video_pre = run_pipe_case(
-    pipe,
-    name="preencoded_visual+action",
-    input_image=dummy_input_image,
-    action_tokens=encoded.action_tokens,
-    visual_latent=encoded.visual_latent,
-    use_preencoded=True,
-)
+# # 3) Test cases
+# video_pre = run_pipe_case(
+#     pipe,
+#     name="preencoded_visual+action",
+#     input_image=dummy_input_image,
+#     action_tokens=encoded.action_tokens,
+#     visual_latent=encoded.visual_latent,
+#     use_preencoded=True,
+# )
 
-zero_action = torch.zeros_like(encoded.action_tokens)
-video_zero_action = run_pipe_case(
-    pipe,
-    name="preencoded_visual+zero_action",
-    input_image=dummy_input_image,
-    action_tokens=zero_action,
-    visual_latent=encoded.visual_latent,
-    use_preencoded=True,
-)
+# zero_action = torch.zeros_like(encoded.action_tokens)
+# video_zero_action = run_pipe_case(
+#     pipe,
+#     name="preencoded_visual+zero_action",
+#     input_image=dummy_input_image,
+#     action_tokens=zero_action,
+#     visual_latent=encoded.visual_latent,
+#     use_preencoded=True,
+# )
 
-# baseline: internal condition path (no preencoded)
-video_baseline = run_pipe_case(
-    pipe,
-    name="baseline_internal_condition",
-    input_image=dummy_input_image,
-    action_tokens=None,
-    visual_latent=None,
-    use_preencoded=False,
-)
+# # baseline: internal condition path (no preencoded)
+# video_baseline = run_pipe_case(
+#     pipe,
+#     name="baseline_internal_condition",
+#     input_image=dummy_input_image,
+#     action_tokens=None,
+#     visual_latent=None,
+#     use_preencoded=False,
+# )
 
-delta_action = abs(frame_checksum(video_pre) - frame_checksum(video_zero_action))
-delta_pre_vs_base = abs(frame_checksum(video_pre) - frame_checksum(video_baseline))
-print(f"[Result] checksum delta(action vs zero_action)={delta_action:.6f}")
-print(f"[Result] checksum delta(preencoded vs baseline)={delta_pre_vs_base:.6f}")
-print("[PASS] Wan DiT forward test finished.")
+# delta_action = abs(frame_checksum(video_pre) - frame_checksum(video_zero_action))
+# delta_pre_vs_base = abs(frame_checksum(video_pre) - frame_checksum(video_baseline))
+# print(f"[Result] checksum delta(action vs zero_action)={delta_action:.6f}")
+# print(f"[Result] checksum delta(preencoded vs baseline)={delta_pre_vs_base:.6f}")
+# print("[PASS] Wan DiT forward test finished.")

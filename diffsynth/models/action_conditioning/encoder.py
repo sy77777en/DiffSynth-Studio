@@ -173,14 +173,24 @@ class ConditionEncoder(nn.Module):
             result.action_tokens = self.action_encoder(actions)
 
         # --- VAE encode visual conditions (frozen) ---
-        # If both observation and history are provided, encode them together in pixel space
-        # so temporal compression happens on the combined past context stream.
-        if (
-            obs_image is not None
-            and history is not None
-            and (cfg.obs_injection is not None or cfg.history_injection is not None)
-        ):
-            past_video = torch.cat([obs_image.unsqueeze(2), history], dim=2)  # (B, 3, 1+K, H, W)
+        # Past context rule:
+        # 1) force history length to cfg.history_frames
+        # 2) past stream is [observation + history] (total cfg.history_frames + 1 frames)
+        # 3) if history is missing, repeat observation to fill all past frames
+        if obs_image is not None and (cfg.obs_injection is not None or cfg.history_injection is not None):
+            target_past_len = cfg.history_frames + 1
+            obs_seq = obs_image.unsqueeze(2)  # (B, 3, 1, H, W)
+            if history is None:
+                past_video = obs_seq.repeat(1, 1, target_past_len, 1, 1)
+            else:
+                # history: (B, 3, K, H, W) -> normalize to exactly cfg.history_frames
+                if history.shape[2] >= cfg.history_frames:
+                    history_norm = history[:, :, :cfg.history_frames]
+                else:
+                    pad_len = cfg.history_frames - history.shape[2]
+                    pad_hist = obs_seq.repeat(1, 1, pad_len, 1, 1)
+                    history_norm = torch.cat([history, pad_hist], dim=2)
+                past_video = torch.cat([obs_seq, history_norm], dim=2)
             result.history_latent = self._vae_encode_video(past_video)
             result.obs_latent = None
         elif obs_image is not None and cfg.obs_injection is not None:
@@ -227,13 +237,5 @@ class ConditionEncoder(nn.Module):
 
             result.visual_latent = torch.cat([mask, result.visual_latent], dim=1)
             result.concat_latent = result.visual_latent
-
-        # # Backward compatibility for existing callers/tests.
-        # if (
-        #     cfg.obs_injection == "input_concat"
-        #     or cfg.traj_injection == "input_concat"
-        #     or cfg.history_injection == "input_concat"
-        # ):
-        #     result.concat_latent = result.visual_latent
 
         return result
