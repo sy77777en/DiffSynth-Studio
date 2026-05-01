@@ -1,59 +1,80 @@
-from dataclasses import dataclass, field
-from typing import Literal
+"""
+Configuration for action-conditioned video DiT.
+Select model by model_name, then derive backbone/vae settings from mapping.
+"""
 
-
-@dataclass
-class ConditionStreamConfig:
-    """Configuration for one conditioning stream."""
-
-    injection_type: Literal["cross_attn", "adaln"]
-    encoder_type: Literal["perceiver", "mlp", "identity"]
-    embed_dim: int = 1024
-    num_queries: int = 16
-    enabled: bool = True
+from dataclasses import dataclass
+from typing import Optional, Literal
 
 
 @dataclass
 class ActionConditioningConfig:
-    """Config for pure world action conditioning."""
+    # Single source of truth
+    model_name: Literal["wan_video_dit", "longcat_video_dit"] = "wan_video_dit"
 
-    backbone: Literal["wan", "cogvideo", "longcat"] = "wan"
-    backbone_dim: int = 5120
-    use_text: bool = False
-    text_dim: int = 4096
-    condition_context_dim: int = 4096
+    # Action
     action_dim: int = 14
-    obs_image_dim: int = 1024
-    masked_image_dim: int = 1024
-    require_frame_alignment: bool = True
+    action_embed_dim: int = 1024
+    action_num_layers: int = 3
 
-    # Condition streams
-    action: ConditionStreamConfig = field(
-        default_factory=lambda: ConditionStreamConfig(
-            injection_type="cross_attn",
-            encoder_type="perceiver",
-            embed_dim=1024,
-        )
-    )
-    obs_image: ConditionStreamConfig = field(
-        default_factory=lambda: ConditionStreamConfig(
-            injection_type="cross_attn",
-            encoder_type="identity",
-            embed_dim=1024,
-            num_queries=1,
-        )
-    )
-    masked_image: ConditionStreamConfig = field(
-        default_factory=lambda: ConditionStreamConfig(
-            injection_type="cross_attn",
-            encoder_type="identity",
-            embed_dim=1024,
-            num_queries=16,
-        )
-    )
+    # Injection methods (None = disabled)
+    # Action condition is routed as context tokens for transformer cross-attn.
+    action_injection: Optional[Literal["adaln", "cross_attn"]] = "cross_attn"
+    # Visual condition is routed via a dedicated visual attention branch.
+    visual_injection: Optional[Literal["spatial_attn", "input_concat", "cross_attn"]] = "spatial_attn"
 
-    # Shared Perceiver defaults
-    perceiver_num_queries: int = 16
-    perceiver_depth: int = 4
-    perceiver_num_heads: int = 8
-    perceiver_ff_mult: int = 4
+    # Visual stream switches used by encoder assembly.
+    obs_injection: Optional[Literal["input_concat", "cross_attn"]] = "input_concat"
+    traj_injection: Optional[Literal["input_concat", "cross_attn"]] = None
+    history_injection: Optional[Literal["input_concat"]] = None
+
+    # Optional fallback weight path (debug only)
+    vae_path: Optional[str] = None
+    # Optional override for VAE model name routing.
+    vae_model_name_override: Optional[str] = None
+    # Optional model root for automatic ckpt path resolution by model_name.
+    model_root: Optional[str] = None
+
+    # Perceiver
+    traj_perceiver_num_queries: int = 64
+    traj_perceiver_depth: int = 4
+    traj_perceiver_num_heads: int = 8
+
+    @property
+    def backbone(self) -> str:
+        return {
+            "wan_video_dit": "wan",
+            "longcat_video_dit": "longcat",
+        }[self.model_name]
+
+    @property
+    def vae_model_name(self) -> str:
+        if self.vae_model_name_override is not None:
+            return self.vae_model_name_override
+        return {
+            "wan_video_dit": "wan_video_vae",
+            "longcat_video_dit": "wan_video_vae",
+        }[self.model_name]
+
+    @property
+    def vae_z_dim(self) -> int:
+        return {"wan_video_vae": 16}[self.vae_model_name]
+
+    @property
+    def vae_temporal_factor(self) -> int:
+        return {"wan_video_vae": 4}[self.vae_model_name]
+
+    @property
+    def vae_spatial_factor(self) -> int:
+        return {"wan_video_vae": 8}[self.vae_model_name]
+
+    @property
+    def concat_channels(self) -> int:
+        n = 0
+        if self.obs_injection == "input_concat":
+            n += self.vae_z_dim
+        if self.traj_injection == "input_concat":
+            n += self.vae_z_dim
+        if self.history_injection == "input_concat":
+            n += self.vae_z_dim
+        return n

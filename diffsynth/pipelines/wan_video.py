@@ -246,6 +246,10 @@ class WanVideoPipeline(BasePipeline):
         motion_bucket_id: int = None,
         # LongCat-Video
         longcat_video: list[Image.Image] = None,
+        # Pre-encoded conditions (optional)
+        preencoded_visual_latent: torch.Tensor = None,
+        preencoded_action_tokens: torch.Tensor = None,
+        skip_condition_vae_encode: bool = False,
         # VAE tiling
         tiled: bool = True,
         tile_size: tuple[int, int] = (30, 52),
@@ -294,6 +298,9 @@ class WanVideoPipeline(BasePipeline):
             "sigma_shift": sigma_shift,
             "motion_bucket_id": motion_bucket_id,
             "longcat_video": longcat_video,
+            "preencoded_visual_latent": preencoded_visual_latent,
+            "preencoded_action_tokens": preencoded_action_tokens,
+            "skip_condition_vae_encode": skip_condition_vae_encode,
             "tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride,
             "sliding_window_size": sliding_window_size, "sliding_window_stride": sliding_window_stride,
             "input_audio": input_audio, "audio_sample_rate": audio_sample_rate, "s2v_pose_video": s2v_pose_video, "audio_embeds": audio_embeds, "s2v_pose_latents": s2v_pose_latents, "motion_video": motion_video,
@@ -477,12 +484,32 @@ class WanVideoUnit_ImageEmbedderCLIP(PipelineUnit):
 class WanVideoUnit_ImageEmbedderVAE(PipelineUnit):
     def __init__(self):
         super().__init__(
-            input_params=("input_image", "end_image", "num_frames", "height", "width", "tiled", "tile_size", "tile_stride"),
+            input_params=(
+                "input_image", "end_image", "num_frames", "height", "width",
+                "tiled", "tile_size", "tile_stride",
+                "preencoded_visual_latent", "skip_condition_vae_encode",
+            ),
             output_params=("y",),
             onload_model_names=("vae",)
         )
 
-    def process(self, pipe: WanVideoPipeline, input_image, end_image, num_frames, height, width, tiled, tile_size, tile_stride):
+    def process(
+        self,
+        pipe: WanVideoPipeline,
+        input_image,
+        end_image,
+        num_frames,
+        height,
+        width,
+        tiled,
+        tile_size,
+        tile_stride,
+        preencoded_visual_latent,
+        skip_condition_vae_encode,
+    ):
+        if skip_condition_vae_encode and preencoded_visual_latent is not None:
+            y = preencoded_visual_latent.to(dtype=pipe.torch_dtype, device=pipe.device)
+            return {"y": y}
         if input_image is None or not pipe.dit.require_vae_embedding:
             return {}
         pipe.load_models_to_device(self.onload_model_names)
@@ -1282,6 +1309,7 @@ def model_fn_wan_video(
     latents: torch.Tensor = None,
     timestep: torch.Tensor = None,
     context: torch.Tensor = None,
+    preencoded_action_tokens: Optional[torch.Tensor] = None,
     clip_feature: Optional[torch.Tensor] = None,
     y: Optional[torch.Tensor] = None,
     reference_latents = None,
@@ -1321,6 +1349,7 @@ def model_fn_wan_video(
             latents=latents,
             timestep=timestep,
             context=context,
+            preencoded_action_tokens=preencoded_action_tokens,
             clip_feature=clip_feature,
             y=y,
             reference_latents=reference_latents,
@@ -1391,7 +1420,24 @@ def model_fn_wan_video(
     # Motion Controller
     if motion_bucket_id is not None and motion_controller is not None:
         t_mod = t_mod + motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))
+    # Text/clip/action context assembly for cross-attention.
     context = dit.text_embedding(context)
+    if clip_feature is not None and dit.require_clip_embedding:
+        clip_embdding = dit.img_emb(clip_feature)
+        context = torch.cat([clip_embdding, context], dim=1)
+    if preencoded_action_tokens is not None:
+        action_tokens = preencoded_action_tokens.to(dtype=context.dtype, device=context.device)
+        ctx_dim = context.shape[-1]
+        if action_tokens.shape[-1] < ctx_dim:
+            pad = torch.zeros(
+                (*action_tokens.shape[:-1], ctx_dim - action_tokens.shape[-1]),
+                dtype=action_tokens.dtype,
+                device=action_tokens.device,
+            )
+            action_tokens = torch.cat([action_tokens, pad], dim=-1)
+        elif action_tokens.shape[-1] > ctx_dim:
+            action_tokens = action_tokens[..., :ctx_dim]
+        context = torch.cat([context, action_tokens], dim=1)
 
     x = latents
     # Merged cfg
@@ -1403,9 +1449,6 @@ def model_fn_wan_video(
     # Image Embedding
     if y is not None and dit.require_vae_embedding:
         x = torch.cat([x, y], dim=1)
-    if clip_feature is not None and dit.require_clip_embedding:
-        clip_embdding = dit.img_emb(clip_feature)
-        context = torch.cat([clip_embdding, context], dim=1)
         
     # Camera control
     if hasattr(dit, "wantodance_enable_global") and dit.wantodance_enable_global and int(wantodance_fps + 0.5) != 30:

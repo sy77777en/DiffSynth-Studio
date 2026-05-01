@@ -1,181 +1,107 @@
 import torch
-from transformers import AutoProcessor, SiglipVisionModel
+import yaml
+from dataclasses import fields
+from PIL import Image
 
-from diffsynth.core import ModelConfig
-from diffsynth.models.action_conditioning import (
-    ActionConditioningConfig,
-    ConditionStreamConfig,
+from diffsynth.models.action_conditioning.encoder import ConditionEncoder
+from diffsynth.models.action_conditioning.config import ActionConditioningConfig
+from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
+
+DEVICE = "cuda:7"
+CFG_PATH = "/data2/siyuanc4/code/DiffSynth-Studio/configs/action_conditioning.yaml"
+
+with open(CFG_PATH, "r") as f:
+    raw = yaml.safe_load(f)
+
+exp_name = raw.get("experiment", "wan")
+experiments = raw.get("experiments", {})
+if exp_name not in experiments:
+    raise ValueError(f"Unknown experiment '{exp_name}', available: {list(experiments.keys())}")
+
+exp_raw = experiments[exp_name]
+exp_cfg = exp_raw
+valid = {f.name for f in fields(ActionConditioningConfig)}
+exp_cfg = {k: v for k, v in exp_cfg.items() if k in valid}
+
+cfg = ActionConditioningConfig(**exp_cfg)
+
+print(f"[Config] experiment={exp_name}")
+print(f"[Config] model_name={cfg.model_name}, backbone={cfg.backbone}, vae_model_name={cfg.vae_model_name}")
+
+cond_encoder = ConditionEncoder(cfg, device=torch.device(DEVICE)).to(DEVICE)
+print(f"[Runtime] vae_class={type(cond_encoder.vae).__name__}")
+print(f"[Runtime] vae_ckpt_path={getattr(cond_encoder.vae, '_loaded_ckpt_path', None)}")
+print(
+    f"[Runtime] load_state_dict missing_keys={len(getattr(cond_encoder.vae, '_missing_keys', []))}, "
+    f"unexpected_keys={len(getattr(cond_encoder.vae, '_unexpected_keys', []))}"
 )
-from diffsynth.pipelines.action_video_pipeline import ActionVideoPipeline
 
+# Build full Wan pipeline from local ckpts (DiT + TextEncoder + VAE).
+MODEL_DIR = exp_raw.get("model_dir", exp_raw.get("model_root"))
+if MODEL_DIR is None:
+    raise ValueError("Please set model_dir (or model_root) in YAML experiment config.")
 
-def p(name, x):
-    if x is None:
-        print(f"[Shape] {name}: None")
-        return
-    if isinstance(x, torch.Tensor):
-        print(f"[Shape] {name}: {tuple(x.shape)}, dtype={x.dtype}, device={x.device}")
-    else:
-        print(f"[Shape] {name}: type={type(x)}")
+# pipe = WanVideoPipeline.from_pretrained(
+#     torch_dtype=torch.bfloat16,
+#     device=DEVICE,
+#     model_configs=[
+#         ModelConfig(path=[f"{MODEL_DIR}/high_noise_model/diffusion_pytorch_model-0000{i}-of-00006.safetensors" for i in range(1, 7)], offload_device="cpu"),
+#         ModelConfig(path=[f"{MODEL_DIR}/low_noise_model/diffusion_pytorch_model-0000{i}-of-00006.safetensors" for i in range(1, 7)], offload_device="cpu"),
+#         ModelConfig(path=f"{MODEL_DIR}/models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
+#         ModelConfig(path=f"{MODEL_DIR}/Wan2.1_VAE.pth", offload_device="cpu"),
+#     ],
+#     tokenizer_config=ModelConfig(path=f"{MODEL_DIR}/google/umt5-xxl"),
+# )
 
+B, T, K, H, W = 1, 16, 3, 224, 224
+obs_image    = torch.randn(B, 3, H, W, device=DEVICE)
+masked_traj  = torch.randn(B, 3, T, H, W, device=DEVICE)
+history      = torch.randn(B, 3, K, H, W, device=DEVICE)
+actions      = torch.randn(B, T, cfg.action_dim, device=DEVICE)
+noisy_latent = torch.randn(B, cfg.vae_z_dim, (T + 1 - 1) // 4 + 1, 28, 28, device=DEVICE) # (17-1)//4+1 = 5
 
-# -----------------------------
-# 0) Device / dtype
-# -----------------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.bfloat16 if device == "cuda" else torch.float32
-print(f"[Info] device={device}, torch_dtype={torch_dtype}")
-
-# -----------------------------
-# 1) 原始输入
-# -----------------------------
-actions = torch.randn(1, 20, 7)
-obs_image = torch.randn(1, 3, 224, 224)
-p("actions(raw)", actions)
-p("obs_image(raw)", obs_image)
-
-# -----------------------------
-# 2) SigLIP
-# -----------------------------
-siglip_id = "google/siglip-so400m-patch14-224"
-print(f"[Info] Loading SigLIP: {siglip_id}")
-processor = AutoProcessor.from_pretrained(siglip_id)
-vision = SiglipVisionModel.from_pretrained(siglip_id).to(device=device, dtype=torch_dtype).eval()
-print(f"[Info] SigLIP hidden_size={vision.config.hidden_size}")
-
-
-def to_pil_batch(images_bchw: torch.Tensor):
-    x = images_bchw.detach().cpu()
-    if x.max() > 1.5:
-        x = x / 255.0
-    x = x.clamp(0, 1)
-    pil_images = []
-    for i in range(x.shape[0]):
-        arr = (x[i] * 255).to(torch.uint8).permute(1, 2, 0).numpy()
-        from PIL import Image
-        pil_images.append(Image.fromarray(arr))
-    return pil_images
-
-
-@torch.no_grad()
-def encode_obs_with_siglip(obs_bchw: torch.Tensor) -> torch.Tensor:
-    p("obs_bchw(in)", obs_bchw)
-    pil = to_pil_batch(obs_bchw)
-    print(f"[Shape] obs PIL batch len: {len(pil)}")
-    inputs = processor(images=pil, return_tensors="pt")
-    pixel_values = inputs["pixel_values"].to(device=device, dtype=torch_dtype)
-    p("obs pixel_values", pixel_values)
-    out = vision(pixel_values=pixel_values)
-    p("obs last_hidden_state", out.last_hidden_state)
-    return out.last_hidden_state  # (B, N_obs, D_obs)
-
-
-@torch.no_grad()
-def encode_masked_seq_with_siglip(masked_btchw: torch.Tensor) -> torch.Tensor:
-    p("masked_btchw(in)", masked_btchw)
-    b, t, c, h, w = masked_btchw.shape
-    flat = masked_btchw.reshape(b * t, c, h, w)
-    p("masked flat(B*T,C,H,W)", flat)
-    pil = to_pil_batch(flat)
-    print(f"[Shape] masked PIL batch len: {len(pil)}")
-    inputs = processor(images=pil, return_tensors="pt")
-    pixel_values = inputs["pixel_values"].to(device=device, dtype=torch_dtype)
-    p("masked pixel_values", pixel_values)
-    tokens = vision(pixel_values=pixel_values).last_hidden_state
-    p("masked tokens(B*T,N,D)", tokens)
-    seq = tokens.view(b, t, tokens.shape[1], tokens.shape[2])
-    p("masked_image_emb_seq(B,T,N,D)", seq)
-    return seq
-
-
-obs_image_emb = encode_obs_with_siglip(obs_image)
-siglip_dim = obs_image_emb.shape[-1]
-
-# 这里先随机模拟 action map 之后的 masked image seq
-masked_image_seq = torch.randn(1, 20, 3, 224, 224)
-p("masked_image_seq(raw)", masked_image_seq)
-masked_image_emb_seq = encode_masked_seq_with_siglip(masked_image_seq)
-
-# -----------------------------
-# 3) 配置
-# -----------------------------
-cfg = ActionConditioningConfig(
-    backbone="wan",
-    action_dim=7,
-    condition_context_dim=4096,
-    use_text=False,
-    require_frame_alignment=True,
-    action=ConditionStreamConfig(
-        injection_type="cross_attn",
-        encoder_type="perceiver",
-        embed_dim=1024,
-        num_queries=8,
-        enabled=True,
-    ),
-    obs_image=ConditionStreamConfig(
-        injection_type="cross_attn",
-        encoder_type="identity",
-        embed_dim=siglip_dim,
-        num_queries=1,
-        enabled=True,
-    ),
-    masked_image=ConditionStreamConfig(
-        injection_type="cross_attn",
-        encoder_type="identity",
-        embed_dim=siglip_dim,
-        num_queries=8,
-        enabled=True,
-    ),
+encoded = cond_encoder.encode(
+    obs_image=obs_image,
+    actions=actions,
+    masked_traj=masked_traj,
+    history=history,
+    noisy_latent=noisy_latent,
 )
-print("[Info] Config ready.")
-print(f"[Info] action_dim={cfg.action_dim}, condition_context_dim={cfg.condition_context_dim}")
-print(f"[Info] obs_embed_dim={cfg.obs_image.embed_dim}, masked_embed_dim={cfg.masked_image.embed_dim}")
 
-# -----------------------------
-# 4) 构建 pipeline
-# -----------------------------
-model_configs = [
-    # 你自己填：至少 dit + vae
-    # ModelConfig(path="...wan_video_dit..."),
-    # ModelConfig(path="...wan_video_vae..."),
-]
+print("action_tokens:", None if encoded.action_tokens is None else encoded.action_tokens.shape)
+print("obs_latent:", None if encoded.obs_latent is None else encoded.obs_latent.shape)
+print("traj_latent:", None if encoded.traj_latent is None else encoded.traj_latent.shape)
+print("history_latent:", None if encoded.history_latent is None else encoded.history_latent.shape)
+print("concat_latent:", None if encoded.concat_latent is None else encoded.concat_latent.shape)
 
-pipe = ActionVideoPipeline.from_pretrained(
-    action_conditioning_config=cfg,
-    model_configs=model_configs,
-    torch_dtype=torch_dtype,
-    device=device,
-)
-print("[Info] Pipeline built.")
-print(f"[Info] pipe.device={pipe.device}, pipe.torch_dtype={pipe.torch_dtype}")
+# ---- concat shape sanity check ----
+if encoded.concat_latent is not None:
+    t_obs = 0 if encoded.obs_latent is None else encoded.obs_latent.shape[2]
+    t_traj = 0 if encoded.traj_latent is None else encoded.traj_latent.shape[2]
+    t_hist = 0 if encoded.history_latent is None else encoded.history_latent.shape[2]
+    t_expected = t_obs + t_traj + t_hist
+    c_expected = cfg.vae_z_dim + 4  # 16 VAE channels + 4 mask channels = 20
 
-# -----------------------------
-# 5) 喂入前最后检查
-# -----------------------------
-actions_in = actions.to(pipe.device, dtype=pipe.torch_dtype)
-obs_emb_in = obs_image_emb.to(pipe.device, dtype=pipe.torch_dtype)
-masked_emb_in = masked_image_emb_seq.to(pipe.device, dtype=pipe.torch_dtype)
+    print(f"[Check] T parts: obs={t_obs}, traj={t_traj}, hist={t_hist}, expected_total={t_expected}")
+    print(f"[Check] concat shape: {tuple(encoded.concat_latent.shape)}")
 
-p("actions(in_pipe)", actions_in)
-p("obs_image_emb(in_pipe)", obs_emb_in)
-p("masked_image_emb_seq(in_pipe)", masked_emb_in)
+    assert encoded.concat_latent.shape[0] == B
+    assert encoded.concat_latent.shape[1] == c_expected
+    assert encoded.concat_latent.shape[2] == t_expected
+    print("[Check] concat_latent shape check passed.")
 
-print("[Check] T_action:", actions_in.shape[1])
-print("[Check] T_masked:", masked_emb_in.shape[1])
-print("[Check] num_frames:", 20)
-
-# # -----------------------------
-# # 6) 运行
-# # -----------------------------
+# # Run pipeline while skipping internal condition VAE encode.
+# dummy_input_image = Image.new("RGB", (832, 480), color=(127, 127, 127))
 # video = pipe(
-#     actions=actions_in,
-#     obs_image_emb=obs_emb_in,
-#     masked_image_emb_seq=masked_emb_in,
-#     num_frames=20,
+#     # prompt="a robot arm moves smoothly in a lab",
+#     negative_prompt="",
+#     input_image=dummy_input_image,
 #     height=480,
 #     width=832,
-#     num_inference_steps=30,
-#     seed=123,
-#     output_type="quantized",
+#     num_frames=17,
+#     seed=0,
+#     tiled=True,
+#     preencoded_visual_latent=encoded.visual_latent,
+#     skip_condition_vae_encode=True,
 # )
-# print("[Done] type(video)=", type(video), "len(video)=", len(video))
+# print("video_frames:", len(video))
