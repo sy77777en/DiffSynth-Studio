@@ -25,6 +25,9 @@ from .config import ActionConditioningConfig
 from .model_paths import resolve_vae_ckpt_path
 # from .encoders.action_encoder import ActionFFNEncoder
 
+# Prepended to visual_latent on channel dim when `noisy_latent` is passed (must match pipeline expectations).
+VISUAL_CONDITION_MASK_CHANNELS = 4
+
 
 class ActionFFNEncoder(nn.Module):
     def __init__(self, action_dim: int, embed_dim: int, num_layers: int = 2):
@@ -196,8 +199,29 @@ class ConditionEncoder(nn.Module):
         elif obs_image is not None and cfg.obs_injection is not None:
             result.obs_latent = self._vae_encode_image(obs_image)
 
-        if masked_traj is not None and cfg.traj_injection is not None:
-            result.traj_latent = self._vae_encode_video(masked_traj)
+        if cfg.traj_injection is not None:
+            if masked_traj is not None:
+                result.traj_latent = self._vae_encode_video(masked_traj)
+            elif noisy_latent is not None:
+                # Placeholder trajectory latent for true no-traj ablation.
+                # Keeps visual_latent temporal length aligned with noisy_latent.
+                B, C, T_lat, H_lat, W_lat = noisy_latent.shape
+
+                # history_latent is usually obs + history compressed to T=1
+                T_hist = result.history_latent.shape[2] if result.history_latent is not None else 0
+                T_traj = T_lat - T_hist
+
+                if T_traj < 0:
+                    raise ValueError(
+                        f"history latent is longer than noisy latent: "
+                        f"T_hist={T_hist}, T_lat={T_lat}"
+                    )
+
+                result.traj_latent = torch.zeros(
+                    B, C, T_traj, H_lat, W_lat,
+                    device=noisy_latent.device,
+                    dtype=noisy_latent.dtype,
+                )
 
         if history is not None and cfg.history_injection is not None and result.history_latent is None:
             result.history_latent = self._vae_encode_video(history)
@@ -221,13 +245,30 @@ class ConditionEncoder(nn.Module):
 
         if visual_parts:
             result.visual_latent = torch.cat(visual_parts, dim=2)
-        
+
+        # Wan DiT does `torch.cat([latents, y], dim=1)` — T and spatial sizes must match latents.
+        # Past-only history often yields T_vis=1 while generation uses T_lat=(num_frames-1)//4+1.
+        if result.visual_latent is not None and noisy_latent is not None:
+            T_lat = noisy_latent.shape[2]
+            Bv, Cv, Tv, Hv, Wv = result.visual_latent.shape
+            if Tv != T_lat:
+                if Tv < T_lat:
+                    pad_t = T_lat - Tv
+                    tail = torch.zeros(
+                        Bv, Cv, pad_t, Hv, Wv,
+                        device=result.visual_latent.device,
+                        dtype=result.visual_latent.dtype,
+                    )
+                    result.visual_latent = torch.cat([result.visual_latent, tail], dim=2)
+                else:
+                    result.visual_latent = result.visual_latent[:, :, :T_lat, :, :]
+
         # --- Build condition mask (4-channel, per sub-frame) ---
         if result.visual_latent is not None and noisy_latent is not None:
             B = noisy_latent.shape[0]
             _, C_vis, T_vis, H_lat, W_lat = result.visual_latent.shape  # ← 用 visual_latent 的维度
 
-            mask = torch.zeros(B, 4, T_vis, H_lat, W_lat,              # ← T_vis 而不是 T_lat
+            mask = torch.zeros(B, VISUAL_CONDITION_MASK_CHANNELS, T_vis, H_lat, W_lat,  # ← T_vis 而不是 T_lat
                                device=result.visual_latent.device,
                                dtype=result.visual_latent.dtype)
 

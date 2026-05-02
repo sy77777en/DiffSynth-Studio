@@ -3,15 +3,15 @@ experiment: wan   # wan / longcat
 experiments:
   wan:
     model_name: "wan_video_dit"
-    model_root: "/data2/siyuanc4/code/DiffSynth-Studio/models/Wan2.2-I2V-A14B"
-    model_dir: "/data2/siyuanc4/code/DiffSynth-Studio/models/Wan2.2-I2V-A14B"
+    model_root: "/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan-AI/Wan2.2-I2V-A14B"
+    model_dir: "/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan-AI/Wan2.2-I2V-A14B"
     action_injection: "cross_attn"
     visual_injection: "spatial_attn"
     action_dim: 7
     action_embed_dim: 1024
     action_num_layers: 2
     obs_injection: "input_concat"
-    traj_injection: "input_concat"
+    traj_injection: null
     history_injection: "input_concat"
 
   longcat:

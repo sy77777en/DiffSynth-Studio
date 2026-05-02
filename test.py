@@ -7,8 +7,8 @@ from diffsynth.models.action_conditioning.encoder import ConditionEncoder
 from diffsynth.models.action_conditioning.config import ActionConditioningConfig
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 
-DEVICE = "cuda:7"
-CFG_PATH = "/data2/siyuanc4/code/DiffSynth-Studio/configs/action_conditioning.yaml"
+DEVICE = "cuda:0"
+CFG_PATH = "./configs/action_conditioning.yaml"
 
 
 def frame_checksum(video_frames):
