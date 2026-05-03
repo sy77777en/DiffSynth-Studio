@@ -96,11 +96,31 @@ def load_yaml_config(config_path: str, experiment: str = None):
     return cfg, exp_raw
 
 
-def build_condition_encoder(cfg: ActionConditioningConfig, device: torch.device) -> ConditionEncoder:
+def build_condition_encoder(
+    cfg: ActionConditioningConfig,
+    device: torch.device,
+    ckpt_path: str = None,
+) -> ConditionEncoder:
+    """构建 ConditionEncoder，可选从 checkpoint 加载训练好的 ActionEncoder 权重。"""
     cond_encoder = ConditionEncoder(cfg, device=device).to(device)
     cond_encoder.eval()
     print(f"[CondEncoder] VAE loaded from: {getattr(cond_encoder.vae, '_loaded_ckpt_path', 'N/A')}")
     print(f"[CondEncoder] action_dim={cfg.action_dim}, embed_dim={cfg.action_embed_dim}")
+
+    # Load trained ActionEncoder weights from checkpoint
+    if ckpt_path is not None:
+        from safetensors import safe_open
+        with safe_open(ckpt_path, framework="pt") as f:
+            ae_sd = {
+                k.replace("condition_encoder.action_encoder.", ""): f.get_tensor(k)
+                for k in f.keys() if "action_encoder" in k
+            }
+        if ae_sd:
+            cond_encoder.action_encoder.load_state_dict(ae_sd)
+            print(f"[CondEncoder] Loaded ActionEncoder weights ({len(ae_sd)} keys) from {ckpt_path}")
+        else:
+            print(f"[CondEncoder] WARNING: no action_encoder keys found in {ckpt_path}!")
+
     return cond_encoder
 
 
@@ -323,7 +343,7 @@ def main():
                         help="Only process first N items (for testing)")
     # LoRA args
     parser.add_argument("--lora_path", type=str, default=None,
-                        help="Path to LoRA checkpoint (.safetensors)")
+                        help="Path to LoRA checkpoint (.safetensors), also loads ActionEncoder weights from it")
     parser.add_argument("--lora_alpha", type=float, default=1.0,
                         help="LoRA scaling factor (default: 1.0)")
     parser.add_argument("--lora_dit", type=str, default="dit",
@@ -338,9 +358,9 @@ def main():
     print(f"[Config] obs_injection={cfg.obs_injection}, traj_injection={cfg.traj_injection}, "
           f"history_injection={cfg.history_injection}, history_frames={cfg.history_frames}")
 
-    # ---- ConditionEncoder ----
+    # ---- ConditionEncoder (+ ActionEncoder weights from checkpoint) ----
     print("[Init] Building ConditionEncoder...")
-    cond_encoder = build_condition_encoder(cfg, device)
+    cond_encoder = build_condition_encoder(cfg, device, ckpt_path=args.lora_path)
 
     # ---- Pipeline (with optional LoRA) ----
     model_dir = exp_raw.get("model_dir", exp_raw.get("model_root"))
