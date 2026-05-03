@@ -133,12 +133,17 @@ class ACWMTrainingModule(WanTrainingModule):
             device=device, dtype=dtype,
         )
 
-        obs_tensor = pil_to_tensor_image(data["obs_image"], device)
-        action_tensor = data["actions"].unsqueeze(0).to(device=device, dtype=torch.float32)
+        # Match submodule weight dtypes (Accelerate bf16 can leave VAE fp32 while ActionFFN is bf16).
+        vae_mod = self.condition_encoder.vae
+        vae_dtype = next(vae_mod.parameters()).dtype
+        ae_dtype = next(self.condition_encoder.action_encoder.parameters()).dtype
+
+        obs_tensor = pil_to_tensor_image(data["obs_image"], device).to(dtype=vae_dtype)
+        action_tensor = data["actions"].unsqueeze(0).to(device=device, dtype=ae_dtype)
 
         history_tensor = None
         if cfg.history_injection is not None and data.get("history_images"):
-            history_tensor = pil_list_to_tensor_video(data["history_images"], device)
+            history_tensor = pil_list_to_tensor_video(data["history_images"], device).to(dtype=vae_dtype)
 
         encoded = self.condition_encoder.encode(
             obs_image=obs_tensor,
