@@ -21,10 +21,10 @@ export TOKENIZERS_PARALLELISM=false
 MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan-AI/Wan2.2-I2V-A14B"
 
 # ACWM dataset: JSON list (same format as prepare_training_data / acwm_dataset.py)
-METADATA_JSON="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/data/ft_wan/train_metadata.json"
+METADATA_JSON="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/syc_test/DiffSynth-Studio/train_metadata_100.json"
 
 # Repo root (DiffSynth-Studio)
-DIFFSYNTH_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio"
+DIFFSYNTH_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/syc_test/DiffSynth-Studio"
 
 # action_conditioning.yaml (experiments.wan must match --acwm_experiment if set)
 ACWM_CONFIG="${DIFFSYNTH_DIR}/configs/action_conditioning.yaml"
@@ -64,7 +64,7 @@ LORA_RANK=16
 LEARNING_RATE="1e-4"
 NUM_EPOCHS=5
 DATASET_REPEAT=10
-SAVE_STEPS=2000
+SAVE_STEPS=500
 NUM_GPUS=1
 
 # Resolution / temporal length for ACWM (1 obs + 16 targets = 17 frames → T_latent=5)
