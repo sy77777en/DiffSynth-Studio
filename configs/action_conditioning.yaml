@@ -1,10 +1,9 @@
-experiment: wan   # wan / longcat
+experiment: wan   # wan | ti2v5b | longcat
 
 experiments:
   wan:
     model_name: "wan_video_dit"
     model_root: "/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan-AI/Wan2.2-I2V-A14B"
-    model_dir: "/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan-AI/Wan2.2-I2V-A14B"
     action_injection: "cross_attn"
     visual_injection: "spatial_attn"
     action_dim: 7
@@ -13,6 +12,27 @@ experiments:
     obs_injection: "input_concat"
     traj_injection: null
     history_injection: "input_concat"
+    # ConditionEncoder VAE (default wan_video_vae): latent z_dim=16, T_stride=4, H/W_stride=8
+
+  ti2v5b:
+    model_name: "wan_video_dit"
+    model_root: "/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan-AI/Wan2.2-TI2V-5B"
+    vae_model_name_override: "wan_video_vae38"
+    # Optional explicit file; else model_root + Wan2.2_VAE.pth
+    # vae_path: "/path/to/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
+    action_injection: "cross_attn"
+    visual_injection: "spatial_attn"
+    action_dim: 7
+    action_embed_dim: 1024
+    action_num_layers: 2
+    obs_injection: "input_concat"
+    traj_injection: null
+    history_injection: "input_concat"
+    # With vae_model_name_override wan_video_vae38 (defaults): z_dim=48, temporal=4, spatial=16
+    # Override only if you know your checkpoint differs:
+    # encoder_vae_z_dim: 48
+    # encoder_vae_temporal_factor: 4
+    # encoder_vae_spatial_factor: 16
 
   longcat:
     model_name: "longcat_video_dit"

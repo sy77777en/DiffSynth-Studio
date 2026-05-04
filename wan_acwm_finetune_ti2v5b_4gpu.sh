@@ -14,7 +14,7 @@ export TOKENIZERS_PARALLELISM=false
 # >>> EDIT THESE PATHS <<<
 # ============================================================================
 # Root of Wan2.2-TI2V-5B (contains diffusion shards, T5, VAE, google/umt5-xxl, …)
-MODEL_DIR="/path/to/Wan2.2-TI2V-5B"
+MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan2.2-TI2V-5B"
 
 DIFFSYNTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -39,8 +39,8 @@ GRAD_ACCUM=2
 # Hyperparameters
 LORA_RANK=16
 LEARNING_RATE="1e-4"
-NUM_EPOCHS=5
-DATASET_REPEAT=10
+NUM_EPOCHS=10
+DATASET_REPEAT=2
 SAVE_STEPS=500
 
 # Resolution / frames — TI2V official LoRA example uses 480x832 x 49f; ACWM uses 17 f (1 obs + 16 targets).
