@@ -1,174 +1,280 @@
 """
-ACWM (Action-Conditioned World Model) — LoRA on DiT + full training on ActionFFNEncoder.
+ACWM v2 — Action-Conditioned World Model training on Wan DiT.
 
-Prerequisites:
-  - Same repo layout as other wanvideo scripts; run from DiffSynth-Studio root or set PYTHONPATH.
-  - `pip install -e .` recommended.
+Conditions:
+  - obs_image:   observation frame (first frame, VAE+CLIP encoded by pipeline)
+  - masked_traj: rendered trajectory images (future frames with masked EEF path)
+  - actions:     delta action sequence (encoded by ActionFFNEncoder)
 
-Example:
-  accelerate launch examples/wanvideo/model_training/train_acwm.py \\
+No history frames. No custom ConditionEncoder.
+Pipeline handles VAE(obs)->mask->y and CLIP(obs)->clip_feature natively.
+ActionFFNEncoder is the only new trainable module.
+
+Trainable:
+  - DiT LoRA (q,k,v,o,ffn.0,ffn.2)
+  - ActionFFNEncoder (full params)
+Frozen:
+  - VAE, T5 text encoder, CLIP image encoder (if loaded)
+
+IMPORTANT: requires one change in diffsynth/pipelines/wan_video.py
+  In model_fn_wan_video(), change the action_tokens block to REPLACE context:
+
+    if preencoded_action_tokens is not None:
+        action_tokens = preencoded_action_tokens.to(dtype=context.dtype, device=context.device)
+        ctx_dim = context.shape[-1]
+        if action_tokens.shape[-1] < ctx_dim:
+            pad = torch.zeros(
+                (*action_tokens.shape[:-1], ctx_dim - action_tokens.shape[-1]),
+                dtype=action_tokens.dtype, device=action_tokens.device,
+            )
+            action_tokens = torch.cat([action_tokens, pad], dim=-1)
+        elif action_tokens.shape[-1] > ctx_dim:
+            action_tokens = action_tokens[..., :ctx_dim]
+        context = action_tokens   # <-- REPLACE, not concat
+
+Example launch:
+  accelerate launch examples/wanvideo/model_training/train_acwm_v2.py \\
     --dataset_base_path . \\
-    --dataset_metadata_path ./train_metadata_100.json \\
+    --dataset_metadata_path ./train_metadata.json \\
     --height 368 --width 640 --num_frames 17 \\
-    --model_id_with_origin_paths "Wan-AI/Wan2.2-I2V-A14B:high_noise_model/diffusion_pytorch_model*.safetensors,..." \\
-    --acwm_config ./configs/action_conditioning.yaml \\
-    --output_path ./models/train/acwm_high_noise \\
+    --model_id_with_origin_paths \\
+      "Wan-AI/Wan2.2-I2V-A14B:high_noise_model/diffusion_pytorch_model-00001-of-00002.safetensors,high_noise_model/diffusion_pytorch_model-00002-of-00002.safetensors;Wan-AI/Wan2.2-I2V-A14B:models_t5_umt5-xxl-enc-bf16.pth;Wan-AI/Wan2.2-I2V-A14B:Wan2.1_VAE.pth" \\
+    --output_path ./output/acwm_v2 \\
+    --trainable_models dit \\
     --lora_base_model dit \\
     --lora_target_modules "q,k,v,o,ffn.0,ffn.2" \\
+    --lora_rank 32 \\
     --extra_inputs input_image \\
     --learning_rate 1e-4 \\
-    --max_timestep_boundary 0.358 --min_timestep_boundary 0
+    --task sft \\
+    --action_dim 7 \\
+    --action_embed_dim 1024
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import sys
 
 import numpy as np
 import torch
-import yaml
-from dataclasses import fields
+import torch.nn as nn
 from PIL import Image
 
-# Repo root (parent of `examples/`)
+# ---------------------------------------------------------------------------
+# Path setup
+# ---------------------------------------------------------------------------
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-
-import accelerate
-from diffsynth.diffusion import ModelLogger
-from diffsynth.diffusion.runner import initialize_deepspeed_gradient_checkpointing, launch_data_process_task
-from diffsynth.models.action_conditioning.config import ActionConditioningConfig
-from diffsynth.models.action_conditioning.encoder import ConditionEncoder
-
-from train import WanTrainingModule, wan_parser
 
 _MT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _MT_DIR not in sys.path:
     sys.path.insert(0, _MT_DIR)
 
+import accelerate
+from diffsynth.diffusion import ModelLogger
+from diffsynth.diffusion.runner import (
+    initialize_deepspeed_gradient_checkpointing,
+    launch_data_process_task,
+)
 
-# ---------------------------------------------------------------------------
-# Config / tensor helpers (aligned with test_cond_encoder.py)
-# ---------------------------------------------------------------------------
-
-
-def load_acwm_config(config_path: str, experiment: str | None = None) -> ActionConditioningConfig:
-    with open(config_path, "r") as f:
-        raw = yaml.safe_load(f)
-    exp_name = experiment or raw.get("experiment", "wan")
-    experiments = raw.get("experiments", {})
-    if exp_name not in experiments:
-        raise ValueError(f"Unknown experiment '{exp_name}', available: {list(experiments.keys())}")
-    exp_raw = experiments[exp_name]
-    valid_fields = {f.name for f in fields(ActionConditioningConfig)}
-    cfg_dict = {k: v for k, v in exp_raw.items() if k in valid_fields}
-    return ActionConditioningConfig(**cfg_dict)
+from train import WanTrainingModule, wan_parser
+from acwm_dataset import ACWMDataset
 
 
-def pil_to_tensor_image(img: Image.Image, device: torch.device) -> torch.Tensor:
-    arr = np.array(img, dtype=np.float32)
-    t = torch.from_numpy(arr).permute(2, 0, 1) / 255.0 * 2.0 - 1.0
-    return t.unsqueeze(0).to(device)
+# ============================================================================
+# ActionFFNEncoder
+# ============================================================================
 
 
-def pil_list_to_tensor_video(images: list, device: torch.device) -> torch.Tensor:
-    frames = []
-    for img in images:
-        arr = np.array(img, dtype=np.float32)
-        t = torch.from_numpy(arr).permute(2, 0, 1) / 255.0 * 2.0 - 1.0
-        frames.append(t)
-    video = torch.stack(frames, dim=1)
-    return video.unsqueeze(0).to(device)
+class ActionFFNEncoder(nn.Module):
+    """MLP encoder: (B, T, action_dim) -> (B, T, embed_dim).
 
-
-# ---------------------------------------------------------------------------
-# Training module
-# ---------------------------------------------------------------------------
-
-
-class ACWMTrainingModule(WanTrainingModule):
+    Output tokens replace the text context in DiT cross-attention.
     """
-    Extends WanTrainingModule with a trainable `ConditionEncoder.action_encoder` (ActionFFN)
-    and injects pre-encoded visual / action tensors into the Wan pipeline (same flags as inference).
 
-    DiT is trained via LoRA from the parent class (`lora_base_model="dit"`).
+    def __init__(self, action_dim: int, embed_dim: int, num_layers: int = 2):
+        super().__init__()
+        layers: list[nn.Module] = [nn.Linear(action_dim, embed_dim), nn.GELU()]
+        for _ in range(max(0, num_layers - 2)):
+            layers += [nn.Linear(embed_dim, embed_dim), nn.GELU()]
+        self.mlp = nn.Sequential(*layers)
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, actions: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.mlp(actions))
+
+
+# ============================================================================
+# Training Module
+# ============================================================================
+
+
+class ACWMv2TrainingModule(WanTrainingModule):
+    """Extends WanTrainingModule for action-conditioned world model training.
+
+    New inputs beyond standard Wan I2V:
+      - actions -> ActionFFNEncoder -> action_tokens (cross-attn context)
+      - masked_traj -> VAE encode -> concat with obs latent as visual condition
+
+    Pipeline natively handles:
+      - obs_image -> VAE encode -> mask + latent -> y (via ImageEmbedderVAE)
+      - obs_image -> CLIP encode -> clip_feature (via ImageEmbedderCLIP, if loaded)
+      - video (obs + targets) -> VAE encode -> input_latents (training GT)
+
+    The masked_traj visual condition is encoded here and injected as
+    preencoded_visual_latent, which ImageEmbedderVAE picks up via
+    skip_condition_vae_encode=True.
     """
 
     def __init__(
         self,
-        acwm_config_path: str,
-        acwm_experiment: str | None = None,
+        action_dim: int = 7,
+        action_embed_dim: int = 1024,
+        action_num_layers: int = 3,
+        use_masked_traj: bool = True,
         *args,
         extra_inputs: str | None = None,
         **kwargs,
     ):
+        # input_image triggers CLIP encoding of obs (if CLIP is loaded)
         if extra_inputs is None:
             extra_inputs = "input_image"
-        super().__init__(*args, extra_inputs=extra_inputs, **kwargs)
-        self.acwm_cfg = load_acwm_config(acwm_config_path, acwm_experiment)
-        dev = self.pipe.device
-        self.condition_encoder = ConditionEncoder(self.acwm_cfg, device=dev).to(dev)
-        for p in self.condition_encoder.action_encoder.parameters():
-            p.requires_grad = True
-        self.condition_encoder.train()
+        elif "input_image" not in extra_inputs:
+            extra_inputs = f"input_image,{extra_inputs}"
 
-    def _encode_acwm_conditions(self, data: dict, inputs_shared: dict) -> dict:
+        super().__init__(*args, extra_inputs=extra_inputs, **kwargs)
+
+        self.use_masked_traj = use_masked_traj
+
+        # Trainable action encoder
+        self.action_encoder = ActionFFNEncoder(
+            action_dim=action_dim,
+            embed_dim=action_embed_dim,
+            num_layers=action_num_layers,
+        )
+        self.action_encoder.train()
+        for p in self.action_encoder.parameters():
+            p.requires_grad = True
+
+    def _encode_visual_condition(self, data: dict, inputs_shared: dict) -> dict:
+        """Encode obs + masked_traj into the visual condition (y).
+
+        Builds a combined visual latent:
+          y = [4ch mask | 16ch VAE latent]  shape (1, 20, T_lat, H', W')
+
+        where the VAE latent is:
+          - obs frame at t=0 (from obs_image)
+          - masked_traj frames for t>0 (future trajectory visualization)
+          - zero-padded to match noisy_latent temporal length
+
+        This replaces the default ImageEmbedderVAE behavior by setting
+        skip_condition_vae_encode=True and providing preencoded_visual_latent.
+        """
+        if not self.use_masked_traj or "masked_traj" not in data:
+            # No masked_traj — let pipeline's ImageEmbedderVAE handle obs normally
+            return inputs_shared
+
         device = self.pipe.device
         dtype = self.pipe.torch_dtype
-        cfg = self.acwm_cfg
 
         height = inputs_shared["height"]
         width = inputs_shared["width"]
         num_frames = inputs_shared["num_frames"]
-        t_latent = (num_frames - 1) // cfg.vae_temporal_factor + 1
-        h_latent = height // cfg.vae_spatial_factor
-        w_latent = width // cfg.vae_spatial_factor
 
-        noisy_ref = torch.zeros(
-            1, cfg.vae_z_dim, t_latent, h_latent, w_latent,
-            device=device, dtype=dtype,
+        # Build the condition video: [obs] + masked_traj frames
+        obs_img = data["obs_image"]
+        traj_imgs = data["masked_traj"]
+
+        # Preprocess to tensor: list of PIL -> (3, T, H, W) in [-1, 1]
+        all_frames = [obs_img] + traj_imgs
+        frame_tensors = []
+        for img in all_frames:
+            if img.size != (width, height):
+                img = img.resize((width, height), Image.LANCZOS)
+            arr = np.array(img, dtype=np.float32)
+            t = torch.from_numpy(arr).permute(2, 0, 1) / 255.0 * 2.0 - 1.0
+            frame_tensors.append(t)
+        # (3, T_cond, H, W)
+        cond_video = torch.stack(frame_tensors, dim=1)
+
+        # Pad or truncate to num_frames
+        T_cond = cond_video.shape[1]
+        if T_cond < num_frames:
+            pad = torch.zeros(3, num_frames - T_cond, height, width)
+            cond_video = torch.cat([cond_video, pad], dim=1)
+        elif T_cond > num_frames:
+            cond_video = cond_video[:, :num_frames]
+
+        # VAE encode the condition video
+        self.pipe.load_models_to_device(["vae"])
+        cond_video = cond_video.to(dtype=dtype, device=device)
+        # vae.encode expects list of (3, T, H, W)
+        y = self.pipe.vae.encode(
+            [cond_video], device=device,
+        )[0]  # (C, T_lat, H', W')
+        y = y.to(dtype=dtype, device=device)
+
+        # Build 4-channel mask: 1 where we have real condition, 0 elsewhere
+        # The obs frame (t=0) is always a real condition
+        T_lat = y.shape[1]
+        H_lat, W_lat = y.shape[2], y.shape[3]
+        n_real_frames = 1 + len(traj_imgs)  # obs + traj frames
+        # How many latent frames correspond to real condition frames
+        n_real_lat = (n_real_frames - 1) // 4 + 1
+        n_real_lat = min(n_real_lat, T_lat)
+
+        msk = torch.zeros(1, num_frames, H_lat, W_lat, device=device)
+        msk[:, :n_real_frames] = 1  # mark real frames
+
+        # Reshape mask to latent temporal resolution (same as ImageEmbedderVAE)
+        msk = torch.cat(
+            [torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]],
+            dim=1,
         )
+        msk = msk.view(1, msk.shape[1] // 4, 4, H_lat, W_lat)
+        msk = msk.transpose(1, 2)[0]  # (4, T_lat, H', W')
 
-        # Match submodule weight dtypes (Accelerate bf16 can leave VAE fp32 while ActionFFN is bf16).
-        vae_mod = self.condition_encoder.vae
-        vae_dtype = next(vae_mod.parameters()).dtype
-        ae_dtype = next(self.condition_encoder.action_encoder.parameters()).dtype
+        # y = [mask (4ch) | latent (16ch)]
+        y = torch.cat([msk, y])  # (20, T_lat, H', W')
+        y = y.unsqueeze(0).to(dtype=dtype, device=device)  # (1, 20, T_lat, H', W')
 
-        obs_tensor = pil_to_tensor_image(data["obs_image"], device).to(dtype=vae_dtype)
-        action_tensor = data["actions"].unsqueeze(0).to(device=device, dtype=ae_dtype)
-
-        history_tensor = None
-        if cfg.history_injection is not None and data.get("history_images"):
-            history_tensor = pil_list_to_tensor_video(data["history_images"], device).to(dtype=vae_dtype)
-
-        encoded = self.condition_encoder.encode(
-            obs_image=obs_tensor,
-            actions=action_tensor,
-            masked_traj=None,
-            history=history_tensor,
-            noisy_latent=noisy_ref,
-        )
-        if encoded.visual_latent is None or encoded.action_tokens is None:
-            raise RuntimeError(
-                "ConditionEncoder returned None for visual_latent or action_tokens; "
-                "check action_conditioning.yaml (obs/history injection vs traj)."
-            )
-
-        inputs_shared["preencoded_visual_latent"] = encoded.visual_latent
-        inputs_shared["preencoded_action_tokens"] = encoded.action_tokens
+        inputs_shared["preencoded_visual_latent"] = y
         inputs_shared["skip_condition_vae_encode"] = True
+
         return inputs_shared
 
     def forward(self, data, inputs=None):
         if inputs is None:
             inputs = self.get_pipeline_inputs(data)
-        inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
+        inputs = self.transfer_data_to_device(
+            inputs, self.pipe.device, self.pipe.torch_dtype
+        )
         inputs_shared, inputs_posi, inputs_nega = inputs
-        inputs_shared = self._encode_acwm_conditions(data, inputs_shared)
+
+        # --- 1. Encode actions ---
+        device = self.pipe.device
+        dtype = next(self.action_encoder.parameters()).dtype
+        actions = data["actions"].unsqueeze(0).to(device=device, dtype=dtype)
+        action_tokens = self.action_encoder(actions)  # (1, T, embed_dim)
+        inputs_shared["preencoded_action_tokens"] = action_tokens
+
+        # --- 2. Encode visual condition (obs + masked_traj) ---
+        inputs_shared = self._encode_visual_condition(data, inputs_shared)
+
+        # --- 3. Run pipeline ---
+        # Remaining units handle:
+        #   PromptEmbedder:     T5("") -> context (replaced by action_tokens in model_fn)
+        #   InputVideoEmbedder: VAE(video) -> input_latents + noise
+        #   ImageEmbedderVAE:   skip (we provided preencoded_visual_latent)
+        #   ImageEmbedderCLIP:  CLIP(obs) -> clip_feature (if loaded)
+        #   model_fn_wan_video: context = action_tokens, x = cat([noisy, y]) -> DiT
+        #   FlowMatchSFTLoss:   MSE(predicted, target)
+
         inputs = (inputs_shared, inputs_posi, inputs_nega)
         for unit in self.pipe.units:
             inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
@@ -176,15 +282,15 @@ class ACWMTrainingModule(WanTrainingModule):
         return loss
 
 
-# ---------------------------------------------------------------------------
-# Optimizer: optional separate LR for ActionFFNEncoder
-# ---------------------------------------------------------------------------
+# ============================================================================
+# Training Launcher
+# ============================================================================
 
 
 def launch_acwm_training_task(
     accelerator: accelerate.Accelerator,
     dataset: torch.utils.data.Dataset,
-    model: ACWMTrainingModule,
+    model: ACWMv2TrainingModule,
     model_logger: ModelLogger,
     learning_rate: float = 1e-5,
     weight_decay: float = 1e-2,
@@ -204,29 +310,43 @@ def launch_acwm_training_task(
 
     action_lr = getattr(args, "action_encoder_lr", None) if args is not None else None
 
+    # Optional separate LR for action encoder
     if action_lr is not None:
-        enc_params = list(model.condition_encoder.action_encoder.parameters())
+        enc_params = list(model.action_encoder.parameters())
         enc_ids = {id(p) for p in enc_params}
-        other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in enc_ids]
-        optimizer = torch.optim.AdamW(
-            [
-                {"params": other_params, "lr": learning_rate, "weight_decay": weight_decay},
-                {"params": enc_params, "lr": action_lr, "weight_decay": weight_decay},
-            ]
-        )
+        other_params = [
+            p for p in model.parameters()
+            if p.requires_grad and id(p) not in enc_ids
+        ]
+        optimizer = torch.optim.AdamW([
+            {"params": other_params, "lr": learning_rate, "weight_decay": weight_decay},
+            {"params": enc_params, "lr": action_lr, "weight_decay": weight_decay},
+        ])
     else:
-        optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
+        optimizer = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
 
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        shuffle=True,
+        collate_fn=lambda x: x[0],
+        num_workers=num_workers,
+    )
+
     model.to(device=accelerator.device)
-    model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
+    model, optimizer, dataloader, scheduler = accelerator.prepare(
+        model, optimizer, dataloader, scheduler,
+    )
     initialize_deepspeed_gradient_checkpointing(accelerator)
 
+    # Logging
     log_every = getattr(args, "log_every_n_steps", 50) if args is not None else 50
-    log_csv = getattr(args, "log_loss_to_csv", False) if args is not None else False
     log_csv_path = None
-    if log_csv and args is not None and getattr(args, "output_path", None):
+    if getattr(args, "log_loss_to_csv", False) and getattr(args, "output_path", None):
         log_csv_path = os.path.join(args.output_path, "training_loss.csv")
         if accelerator.is_main_process:
             os.makedirs(args.output_path, exist_ok=True)
@@ -236,13 +356,11 @@ def launch_acwm_training_task(
 
     load_from_cache = getattr(dataset, "load_from_cache", False)
     global_step = 0
+
     for epoch_id in range(num_epochs):
         for data in tqdm(dataloader, desc=f"epoch {epoch_id}"):
             with accelerator.accumulate(model):
-                if load_from_cache:
-                    loss = model({}, inputs=data)
-                else:
-                    loss = model(data)
+                loss = model({}, inputs=data) if load_from_cache else model(data)
                 accelerator.backward(loss)
                 optimizer.step()
                 scheduler.step()
@@ -253,55 +371,67 @@ def launch_acwm_training_task(
             if log_every > 0 and global_step % log_every == 0:
                 lv = loss.detach().float()
                 if accelerator.num_processes > 1:
-                    if hasattr(accelerator, "reduce"):
-                        lv = accelerator.reduce(lv, reduction="mean")
-                    elif hasattr(accelerator, "gather_for_metrics"):
-                        lv = accelerator.gather_for_metrics(lv.unsqueeze(0)).mean()
-                    else:
-                        lv = accelerator.gather(lv.unsqueeze(0)).mean()
-                loss_val = lv.item() if isinstance(lv, torch.Tensor) else float(lv)
+                    lv = (
+                        accelerator.reduce(lv, reduction="mean")
+                        if hasattr(accelerator, "reduce")
+                        else accelerator.gather(lv.unsqueeze(0)).mean()
+                    )
+                loss_val = (
+                    lv.item() if isinstance(lv, torch.Tensor) else float(lv)
+                )
                 if accelerator.is_main_process:
-                    tqdm.write(f"[train] epoch={epoch_id} step={global_step} loss={loss_val:.6f}")
+                    tqdm.write(
+                        f"[train] epoch={epoch_id} step={global_step} "
+                        f"loss={loss_val:.6f}"
+                    )
                     if log_csv_path is not None:
                         with open(log_csv_path, "a", newline="") as f:
-                            csv.writer(f).writerow([global_step, epoch_id, f"{loss_val:.8f}"])
+                            csv.writer(f).writerow(
+                                [global_step, epoch_id, f"{loss_val:.8f}"]
+                            )
+
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
+
     model_logger.on_training_end(accelerator, model, save_steps)
 
 
-# ---------------------------------------------------------------------------
+# ============================================================================
 # CLI
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 
-def acwm_train_parser() -> argparse.ArgumentParser:
+def acwm_v2_parser() -> argparse.ArgumentParser:
     parser = wan_parser()
     parser.add_argument(
-        "--acwm_config",
-        type=str,
-        required=True,
-        help="YAML with ActionConditioningConfig (same as inference_test / test_cond_encoder).",
-    )
-    parser.add_argument("--acwm_experiment", type=str, default=None, help="Experiment key under `experiments:` in YAML.")
-    parser.add_argument(
-        "--action_encoder_lr",
-        type=float,
-        default=None,
-        help="Optional LR for ActionFFNEncoder only; --learning_rate applies to LoRA (DiT) and other trainable params.",
+        "--action_dim", type=int, default=7,
+        help="Dimension of each action vector.",
     )
     parser.add_argument(
-        "--log_every_n_steps",
-        type=int,
-        default=50,
-        help="Print averaged loss every N dataloader steps (0 = disable). Uses accelerator.reduce for multi-GPU mean.",
+        "--action_embed_dim", type=int, default=1024,
+        help="Action encoder output dim (should match DiT cross-attn dim).",
     )
     parser.add_argument(
-        "--log_loss_to_csv",
-        action="store_true",
-        help="Append rows to --output_path/training_loss.csv (columns: global_step, epoch, loss).",
+        "--action_num_layers", type=int, default=2,
+        help="Number of MLP layers in action encoder.",
     )
-    # Relax dataset_base_path: ACWM metadata uses absolute frame paths.
+    parser.add_argument(
+        "--action_encoder_lr", type=float, default=None,
+        help="Separate LR for ActionFFNEncoder. Default: same as --learning_rate.",
+    )
+    parser.add_argument(
+        "--no_masked_traj", action="store_true",
+        help="Disable masked trajectory conditioning (obs-only visual condition).",
+    )
+    parser.add_argument(
+        "--log_every_n_steps", type=int, default=50,
+        help="Print loss every N steps (0=disable).",
+    )
+    parser.add_argument(
+        "--log_loss_to_csv", action="store_true",
+        help="Append loss to --output_path/training_loss.csv.",
+    )
+    # Relax dataset_base_path
     for action in parser._actions:
         if "--dataset_base_path" in action.option_strings:
             action.required = False
@@ -311,23 +441,29 @@ def acwm_train_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ============================================================================
+# Main
+# ============================================================================
+
 if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    parser = acwm_train_parser()
+    parser = acwm_v2_parser()
     args = parser.parse_args()
-
-    from acwm_dataset import ACWMDataset
 
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
+        kwargs_handlers=[
+            accelerate.DistributedDataParallelKwargs(
+                find_unused_parameters=args.find_unused_parameters,
+            ),
+        ],
     )
 
     if args.height is None or args.width is None:
-        raise SystemExit("ACWM training requires explicit --height and --width (e.g. 368 640).")
+        raise SystemExit("--height and --width are required (e.g. 368 640).")
     if args.dataset_metadata_path is None:
-        raise SystemExit("--dataset_metadata_path is required (path to train_metadata.json).")
+        raise SystemExit("--dataset_metadata_path is required.")
 
     dataset = ACWMDataset(
         args.dataset_metadata_path,
@@ -336,9 +472,12 @@ if __name__ == "__main__":
         repeat=args.dataset_repeat,
     )
 
-    model = ACWMTrainingModule(
-        acwm_config_path=args.acwm_config,
-        acwm_experiment=args.acwm_experiment,
+    model = ACWMv2TrainingModule(
+        action_dim=args.action_dim,
+        action_embed_dim=args.action_embed_dim,
+        action_num_layers=args.action_num_layers,
+        use_masked_traj=not args.no_masked_traj,
+        # --- Parent class args ---
         model_paths=args.model_paths,
         model_id_with_origin_paths=args.model_id_with_origin_paths,
         tokenizer_path=args.tokenizer_path,
@@ -356,7 +495,11 @@ if __name__ == "__main__":
         fp8_models=args.fp8_models,
         offload_models=args.offload_models,
         task=args.task,
-        device="cpu" if getattr(args, "initialize_model_on_cpu", False) else accelerator.device,
+        device=(
+            "cpu"
+            if getattr(args, "initialize_model_on_cpu", False)
+            else accelerator.device
+        ),
         max_timestep_boundary=args.max_timestep_boundary,
         min_timestep_boundary=args.min_timestep_boundary,
     )
