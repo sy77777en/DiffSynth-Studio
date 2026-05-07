@@ -225,7 +225,7 @@ class TemporalAttentionAdapter(nn.Module):
         temporal attention over F for each spatial location.
         """
         b, n, d = x.shape
-        assert n == t * h * w, f"Token length mismatch: got {n}, expected {f*h*w}"
+        assert n == t * h * w, f"Token length mismatch: got {n}, expected {t*h*w}"
         
         residual = x
         
@@ -609,10 +609,10 @@ class WanModel(torch.nn.Module):
                     block,
                     use_gradient_checkpointing,
                     use_gradient_checkpointing_offload,
-                    x, context, t_mod, freqs
+                    x, context, t_mod, freqs, (f, h, w)
                 )
             else:
-                x = block(x, context, t_mod, freqs)
+                x = block(x, context, t_mod, freqs, (f, h, w))
 
         x = self.head(x, t)
         x = self.unpatchify(x, (f, h, w))
