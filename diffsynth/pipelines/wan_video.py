@@ -1607,7 +1607,7 @@ def model_fn_wan_video(
                     block,
                     use_gradient_checkpointing,
                     use_gradient_checkpointing_offload,
-                    x, context, t_mod, freqs
+                    x, context, t_mod, freqs, (f, h, w)
                 )
               
             
