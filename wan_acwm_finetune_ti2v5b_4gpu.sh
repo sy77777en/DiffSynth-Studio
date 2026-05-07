@@ -1,79 +1,82 @@
 #!/usr/bin/env bash
-# ACWM LoRA + ActionFFN on Wan2.2-TI2V-5B (single DiT, no high/low split).
-# Layout: diffusion_pytorch_model-{01,02,03}-of-00003.safetensors + T5 + Wan2.2_VAE.pth (+ google/umt5 tokenizer).
-#
-# Usage:
-#   bash wan_acwm_finetune_ti2v5b_4gpu.sh
-#
-# Requires: 4 GPUs (DeepSpeed ZeRO-2, bf16). Tune GRAD_ACCUM / NUM_GPUS if OOM.
-
 set -e
 export TOKENIZERS_PARALLELISM=false
 
 # ============================================================================
-# >>> EDIT THESE PATHS <<<
+# Usage:
+#   bash wan_acwm_finetune.sh [NUM_GPUS] [GRAD_ACCUM]
+# Example:
+#   bash wan_acwm_finetune.sh 4 2
+#   bash wan_acwm_finetune.sh 1 4
 # ============================================================================
-# Root of Wan2.2-TI2V-5B (contains diffusion shards, T5, VAE, google/umt5-xxl, …)
-MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan2.2-TI2V-5B"
 
+NUM_GPUS="${1:-4}"
+GRAD_ACCUM="${2:-2}"
+
+# ============================================================================
+# Paths
+# ============================================================================
+MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan2.2-TI2V-5B"
 DIFFSYNTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-METADATA_JSON="${DIFFSYNTH_DIR}/train_metadata_100.json"
 ACWM_CONFIG="${DIFFSYNTH_DIR}/configs/action_conditioning.yaml"
 
-LORA_INIT_PATH=""
-ACTION_ENCODER_LR="1e-4"
-LOG_EVERY_N_STEPS=50
-LOG_LOSS_TO_CSV=1
+# If dataset/model path are already in YAML, you can remove METADATA_JSON/MODEL_DIR usage
+# from argparse later. For now keep metadata explicit unless train_acwm.py reads it from YAML.
+METADATA_JSON="${DIFFSYNTH_DIR}/train_metadata_100.json"
 
-# Optional second-stage-style presets (same checkpoint format as 14B ACWM)
-PRESET_LORA_DIT_PATH=""
-ACTION_ENCODER_CKPT=""
-USE_FREEZE_ACTION_ENCODER=0
-
-# Hardware
-NUM_GPUS=4
-# Per-process gradient accumulation (effective optimizer steps scale with NUM_GPUS * GRAD_ACCUM)
-GRAD_ACCUM=2
-
+# ============================================================================
 # Hyperparameters
+# ============================================================================
 LORA_RANK=16
 LEARNING_RATE="1e-4"
+ACTION_ENCODER_LR="1e-4"
 NUM_EPOCHS=10
 DATASET_REPEAT=2
 SAVE_STEPS=500
 
-# Resolution / frames — TI2V official LoRA example uses 480x832 x 49f; ACWM uses 17 f (1 obs + 16 targets).
 TRAIN_HEIGHT=368
 TRAIN_WIDTH=640
 TRAIN_NUM_FRAMES=17
 
-# Single DiT: full FlowMatch timestep range [0, 1]
 MAX_TIMESTEP=1.0
 MIN_TIMESTEP=0.0
+
 LORA_BASE_MODEL="dit"
 CKPT_PREFIX="pipe.dit."
-# ============================================================================
+
+LOG_EVERY_N_STEPS=50
+LOG_LOSS_TO_CSV=1
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-TRAIN_TAG="acwm_ti2v5b_4gpu"
-OUTPUT_PATH="${DIFFSYNTH_DIR}/outputs/acwm_ti2v5b_${TRAIN_TAG}_${TIMESTAMP}"
+TRAIN_TAG="acwm_ti2v5b_${NUM_GPUS}gpu"
+OUTPUT_PATH="${DIFFSYNTH_DIR}/outputs/${TRAIN_TAG}_${TIMESTAMP}"
 mkdir -p "$OUTPUT_PATH"
 
 echo "========================================="
-echo "ACWM — Wan2.2-TI2V-5B — ${NUM_GPUS} GPUs"
+echo "ACWM Training"
 echo "========================================="
-echo "MODEL_DIR:       $MODEL_DIR"
-echo "LoRA base:       $LORA_BASE_MODEL  (strip ckpt prefix: ${CKPT_PREFIX})"
-echo "Timestep:        [$MIN_TIMESTEP, $MAX_TIMESTEP]"
-echo "Frames:          ${TRAIN_NUM_FRAMES}  (${TRAIN_HEIGHT}x${TRAIN_WIDTH})"
-echo "GPUs:            $NUM_GPUS  grad_accum=$GRAD_ACCUM"
-echo "Output:          $OUTPUT_PATH"
+echo "GPUs:       $NUM_GPUS"
+echo "Grad accum: $GRAD_ACCUM"
+echo "Config:     $ACWM_CONFIG"
+echo "Metadata:   $METADATA_JSON"
+echo "Output:     $OUTPUT_PATH"
 echo "========================================="
 
-# ----------------------------------------------------------------------------
+# ============================================================================
 # Sanity checks
-# ----------------------------------------------------------------------------
+# ============================================================================
+if [ ! -f "$ACWM_CONFIG" ]; then
+  echo "Error: ACWM config not found: $ACWM_CONFIG"
+  exit 1
+fi
+
+if [ ! -f "$METADATA_JSON" ]; then
+  echo "Error: metadata not found: $METADATA_JSON"
+  exit 1
+fi
+
+# Optional model sanity checks
 for f in \
   "diffusion_pytorch_model-00001-of-00003.safetensors" \
   "diffusion_pytorch_model-00002-of-00003.safetensors" \
@@ -86,23 +89,21 @@ do
     exit 1
   fi
 done
-if [ ! -f "$METADATA_JSON" ]; then
-  echo "Error: metadata not found: $METADATA_JSON"
-  exit 1
-fi
-if [ ! -f "$ACWM_CONFIG" ]; then
-  echo "Error: ACWM config not found: $ACWM_CONFIG"
-  exit 1
-fi
-if [ -n "$LORA_INIT_PATH" ] && [ ! -f "$LORA_INIT_PATH" ]; then
-  echo "Error: LoRA checkpoint not found: $LORA_INIT_PATH"
-  exit 1
-fi
 
-# ----------------------------------------------------------------------------
-# Accelerate + DeepSpeed ZeRO-2
-# ----------------------------------------------------------------------------
-ACCEL_CONFIG="/tmp/wan_acwm_ti2v5b_accelerate_$$.yaml"
+# ============================================================================
+# Accelerate config
+# ============================================================================
+ACCEL_CONFIG="/tmp/wan_acwm_accelerate_${NUM_GPUS}gpu_$$.yaml"
+
+if [ "$NUM_GPUS" -eq 1 ]; then
+cat > "$ACCEL_CONFIG" << EOF
+compute_environment: LOCAL_MACHINE
+distributed_type: NO
+mixed_precision: bf16
+num_machines: 1
+num_processes: 1
+EOF
+else
 cat > "$ACCEL_CONFIG" << EOF
 compute_environment: LOCAL_MACHINE
 deepspeed_config:
@@ -114,8 +115,11 @@ mixed_precision: bf16
 num_machines: 1
 num_processes: ${NUM_GPUS}
 EOF
+fi
 
-# Order: DiT shards → T5 → VAE (single wan_video_dit → pipe.dit only; pipe.dit2 stays unused)
+# ============================================================================
+# Model paths
+# ============================================================================
 MODEL_PATHS_JSON="[
   [
     \"${MODEL_DIR}/diffusion_pytorch_model-00001-of-00003.safetensors\",
@@ -127,31 +131,16 @@ MODEL_PATHS_JSON="[
 ]"
 
 OPTIONAL_ARGS=()
-if [ -n "$LORA_INIT_PATH" ]; then
-  OPTIONAL_ARGS+=(--lora_checkpoint "$LORA_INIT_PATH")
-fi
-if [ -n "$ACTION_ENCODER_LR" ]; then
-  OPTIONAL_ARGS+=(--action_encoder_lr "$ACTION_ENCODER_LR")
-fi
+
+OPTIONAL_ARGS+=(--action_encoder_lr "$ACTION_ENCODER_LR")
 OPTIONAL_ARGS+=(--log_every_n_steps "$LOG_EVERY_N_STEPS")
+
 if [ "${LOG_LOSS_TO_CSV:-0}" = "1" ]; then
   OPTIONAL_ARGS+=(--log_loss_to_csv)
 fi
-if [ -n "${PRESET_LORA_DIT_PATH:-}" ]; then
-  OPTIONAL_ARGS+=(--preset_lora_path "$PRESET_LORA_DIT_PATH" --preset_lora_model "dit")
-fi
-if [ -n "${ACTION_ENCODER_CKPT:-}" ]; then
-  OPTIONAL_ARGS+=(--action_encoder_checkpoint "$ACTION_ENCODER_CKPT")
-fi
-if [ "${USE_FREEZE_ACTION_ENCODER:-0}" = "1" ]; then
-  OPTIONAL_ARGS+=(--freeze_action_encoder)
-fi
-# Local tokenizer (recommended if MODEL_DIR contains google/umt5-xxl)
+
 if [ -d "${MODEL_DIR}/google/umt5-xxl" ]; then
   OPTIONAL_ARGS+=(--tokenizer_path "${MODEL_DIR}/google/umt5-xxl")
-elif [ -d "${MODEL_DIR}/google" ]; then
-  # Some snapshots only have google/ without deeper path; keep default tokenizer if unset.
-  echo "[warn] No ${MODEL_DIR}/google/umt5-xxl — using built-in tokenizer_config from train.py."
 fi
 
 cd "$DIFFSYNTH_DIR"
@@ -159,6 +148,7 @@ cd "$DIFFSYNTH_DIR"
 accelerate launch \
   --config_file "$ACCEL_CONFIG" \
   examples/wanvideo/model_training/train_acwm.py \
+  --acwm_config "$ACWM_CONFIG" \
   --dataset_base_path . \
   --dataset_metadata_path "$METADATA_JSON" \
   --dataset_num_workers 8 \
@@ -167,7 +157,6 @@ accelerate launch \
   --num_frames "$TRAIN_NUM_FRAMES" \
   --dataset_repeat "$DATASET_REPEAT" \
   --model_paths "$MODEL_PATHS_JSON" \
-  --acwm_config "$ACWM_CONFIG" \
   --learning_rate "$LEARNING_RATE" \
   --num_epochs "$NUM_EPOCHS" \
   --save_steps "$SAVE_STEPS" \
@@ -183,6 +172,4 @@ accelerate launch \
   "${OPTIONAL_ARGS[@]}"
 
 echo ""
-echo "========================================="
 echo "Done. Checkpoints: $OUTPUT_PATH"
-echo "========================================="
