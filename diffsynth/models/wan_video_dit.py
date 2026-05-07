@@ -447,10 +447,24 @@ class WanModel(torch.nn.Module):
         )
         self.time_projection = nn.Sequential(
             nn.SiLU(), nn.Linear(dim, dim * 6))
+        # self.blocks = nn.ModuleList([
+        #     DiTBlock(has_image_input, dim, num_heads, ffn_dim, eps)
+        #     for _ in range(num_layers)
+        # ])
+
+        temporal_adapter_layers = [12, 16, 20]
         self.blocks = nn.ModuleList([
-            DiTBlock(has_image_input, dim, num_heads, ffn_dim, eps)
-            for _ in range(num_layers)
+            DiTBlock(
+                has_image_input,
+                dim,
+                num_heads,
+                ffn_dim,
+                eps,
+                use_temporal_adapter=(i in temporal_adapter_layers),
+            )
+            for i in range(num_layers)
         ])
+        
         self.head = Head(dim, out_dim, patch_size, eps)
         head_dim = dim // num_heads
 
