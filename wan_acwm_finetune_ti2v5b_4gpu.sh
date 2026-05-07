@@ -16,7 +16,7 @@ GRAD_ACCUM="${2:-2}"
 # ============================================================================
 # Paths
 # ============================================================================
-MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan2.2-TI2V-5B"
+MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan-AI/Wan2.2-TI2V-5B"
 DIFFSYNTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ACWM_CONFIG="${DIFFSYNTH_DIR}/configs/action_conditioning.yaml"
