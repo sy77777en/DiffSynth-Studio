@@ -1437,7 +1437,8 @@ def model_fn_wan_video(
             action_tokens = torch.cat([action_tokens, pad], dim=-1)
         elif action_tokens.shape[-1] > ctx_dim:
             action_tokens = action_tokens[..., :ctx_dim]
-        context = torch.cat([context, action_tokens], dim=1)
+        # context = torch.cat([context, action_tokens], dim=1)
+        context = action_tokens
 
     x = latents
     # Merged cfg
