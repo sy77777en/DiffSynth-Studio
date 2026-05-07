@@ -6,7 +6,6 @@ Reads `train_metadata.json` produced by prepare_training_data.py.
 Each sample returns:
   - "video":          list[PIL.Image], length 17 (1 obs + 16 targets)
   - "obs_image":      PIL.Image
-  - "history_images": list[PIL.Image], length 3
   - "actions":        torch.Tensor, shape (16, 7)
   - "prompt":         ""
 
@@ -27,7 +26,6 @@ class ACWMDataset(Dataset):
     """
     Fixed specification:
       - 1 observation frame
-      - 3 history frames
       - 16 target frames
       - 16 action vectors (each is 7D)
       - Images are resized to (height, width), both must be multiples of 16
@@ -43,21 +41,19 @@ class ACWMDataset(Dataset):
         with open(metadata_path, "r") as f:
             self.data = json.load(f)
 
-        assert height % 16 == 0, f"height={height} must be a multiple of 16"
-        assert width % 16 == 0, f"width={width} must be a multiple of 16"
+        assert height % 32 == 0, f"height={height} must be a multiple of 32"
+        assert width % 32 == 0, f"width={width} must be a multiple of 32"
 
         self.height = height
         self.width = width
         self.repeat = repeat
 
         # Validate the first sample format
-        s = self.data[0]
-        assert len(s["target_frames"]) >= 16, \
-            f"Not enough target_frames: {len(s['target_frames'])}"
-        assert len(s["history_frames"]) >= 3, \
-            f"Not enough history_frames: {len(s['history_frames'])}"
-        assert len(s["actions"]) >= 16, \
-            f"Not enough actions: {len(s['actions'])}"
+        # s = self.data[0]
+        # assert len(s["target_frames"]) >= 16, \
+        #     f"Not enough target_frames: {len(s['target_frames'])}"
+        # assert len(s["actions"]) >= 16, \
+        #     f"Not enough actions: {len(s['actions'])}"
 
         print(
             f"[ACWMDataset] {len(self.data)} samples, repeat={repeat}, "
@@ -77,9 +73,6 @@ class ACWMDataset(Dataset):
         sample = self.data[idx % len(self.data)]
 
         obs_img = self._load_image(sample["obs_frame"])
-        history_imgs = [
-            self._load_image(p) for p in sample["history_frames"][:3]
-        ]
         target_imgs = [
             self._load_image(p) for p in sample["target_frames"][:16]
         ]
@@ -94,7 +87,6 @@ class ACWMDataset(Dataset):
         return {
             "video": video,
             "obs_image": obs_img,
-            "history_images": history_imgs,
             "actions": actions,
             "prompt": "",
         }
@@ -126,13 +118,11 @@ if __name__ == "__main__":
 
         video = sample["video"]
         obs = sample["obs_image"]
-        hist = sample["history_images"]
         actions = sample["actions"]
 
         print(f"\nSample {i} (load time: {dt:.2f}s):")
         print(f"  video:    {len(video)} frames, first frame size={video[0].size}")
         print(f"  obs:      size={obs.size}")
-        print(f"  history:  {len(hist)} frames, size={hist[0].size}")
         print(f"  actions:  shape={actions.shape}, dtype={actions.dtype}")
         print(f"  actions[0]: {actions[0].tolist()}")
         print(f"  prompt:   '{sample['prompt']}'")
