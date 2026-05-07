@@ -201,6 +201,51 @@ class CrossAttention(nn.Module):
         return self.o(x)
 
 
+class TemporalAttentionAdapter(nn.Module):
+    def __init__(self, dim: int, num_heads: int, eps: float = 1e-6, init_scale: float = 0.0):
+        super().__init__()
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.o = nn.Linear(dim, dim)
+        self.norm_q = RMSNorm(dim, eps=eps)
+        self.norm_k = RMSNorm(dim, eps=eps)
+        self.num_heads = num_heads
+        self.attn = AttentionModule(num_heads)
+        
+        # zero-init makes insertion safe at start
+        nn.init.zeros_(self.o.weight)
+        nn.init.zeros_(self.o.bias)
+
+        self.gate = nn.Parameter(torch.ones(1) * init_scale)
+    
+    def forward(self, x, t: int, h: int, w:int):
+        """
+        x: [B, T*H*W, D]
+        temporal attention over F for each spatial location.
+        """
+        b, n, d = x.shape
+        assert n == t * h * w, f"Token length mismatch: got {n}, expected {f*h*w}"
+        
+        residual = x
+        
+        x_5d = x.view(b, t, h, w, d).permute(0, 2, 3, 1, 4).contiguous()
+        x_t = x_5d.view(b * h * w, t, d)
+        
+        q = self.norm_q(self.q(x_t))
+        k = self.norm_k(self.k(x_t))
+        v = self.v(x_t)
+        
+        out = self.attn(q, k, v)
+        out = self.o(out)
+        
+        out = out.view(b, h, w, t, d)
+        out = out.permute(0, 3, 1, 2, 4).contiguous()
+        out = out.view(b, t * h * w, d)
+
+        return residual + self.gate * out
+
+
 class GateModule(nn.Module):
     def __init__(self,):
         super().__init__()
@@ -209,13 +254,16 @@ class GateModule(nn.Module):
         return x + gate * residual
 
 class DiTBlock(nn.Module):
-    def __init__(self, has_image_input: bool, dim: int, num_heads: int, ffn_dim: int, eps: float = 1e-6):
+    def __init__(self, has_image_input: bool, dim: int, num_heads: int, ffn_dim: int, eps: float = 1e-6, use_temporal_adapter: bool = False,):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.ffn_dim = ffn_dim
 
         self.self_attn = SelfAttention(dim, num_heads, eps)
+        self.use_temporal_adapter = use_temporal_adapter
+        if self.use_temporal_adapter:
+            self.temporal_adapter = TemporalAttentionAdapter(dim, num_heads, eps)
         self.cross_attn = CrossAttention(
             dim, num_heads, eps, has_image_input=has_image_input)
         self.norm1 = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
@@ -226,7 +274,7 @@ class DiTBlock(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
         self.gate = GateModule()
 
-    def forward(self, x, context, t_mod, freqs):
+    def forward(self, x, context, t_mod, freqs, grid_size=None):
         has_seq = len(t_mod.shape) == 4
         chunk_dim = 2 if has_seq else 1
         # msa: multi-head self-attention  mlp: multi-layer perceptron
@@ -239,6 +287,12 @@ class DiTBlock(nn.Module):
             )
         input_x = modulate(self.norm1(x), shift_msa, scale_msa)
         x = self.gate(x, gate_msa, self.self_attn(input_x, freqs))
+        
+        if self.use_temporal_adapter:
+            assert grid_size is not None, "grid_size=(f, h, w) is required"
+            f, h, w = grid_size
+            x = self.temporal_adapter(x, f, h, w)
+        
         x = x + self.cross_attn(self.norm3(x), context)
         input_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = self.gate(x, gate_mlp, self.ffn(input_x))
