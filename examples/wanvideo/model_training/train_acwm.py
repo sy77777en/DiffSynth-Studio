@@ -137,6 +137,7 @@ class ACWMv2TrainingModule(WanTrainingModule):
         action_embed_dim: int = 1024,
         action_num_layers: int = 3,
         use_masked_traj: bool = True,
+        enable_temporal_adapter: bool = False,
         *args,
         extra_inputs: str | None = None,
         **kwargs,
@@ -160,6 +161,15 @@ class ACWMv2TrainingModule(WanTrainingModule):
         self.action_encoder.train()
         for p in self.action_encoder.parameters():
             p.requires_grad = True
+
+        if not enable_temporal_adapter:
+            for block in self.pipe.dit.blocks:
+                block.use_temporal_adapter = False
+        else:
+            for block inself.pipe.dit.blocks:
+                if block.use_temporal_adapter:
+                    for p in block.temporal_adapter.parameters():
+                        p.requires_grad = True
 
     def _encode_visual_condition(self, data: dict, inputs_shared: dict) -> dict:
         """Encode obs + masked_traj into the visual condition (y).
@@ -431,6 +441,10 @@ def acwm_v2_parser() -> argparse.ArgumentParser:
         "--log_loss_to_csv", action="store_true",
         help="Append loss to --output_path/training_loss.csv.",
     )
+    parser.add_argument(
+        "--enable_temporal_adapter", action="store_true", default=False,
+        help="Enable temporal attention adapter in DiT blocks 12/16/20.",
+    )
     # Relax dataset_base_path
     for action in parser._actions:
         if "--dataset_base_path" in action.option_strings:
@@ -477,6 +491,7 @@ if __name__ == "__main__":
         action_embed_dim=args.action_embed_dim,
         action_num_layers=args.action_num_layers,
         use_masked_traj=not args.no_masked_traj,
+        enable_temporal_adapter=args.enable_temporal_adapter,
         # --- Parent class args ---
         model_paths=args.model_paths,
         model_id_with_origin_paths=args.model_id_with_origin_paths,
