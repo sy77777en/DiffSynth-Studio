@@ -67,6 +67,8 @@ DATASET_REPEAT=10
 SAVE_STEPS=500
 NUM_GPUS=1
 
+ENABLE_TEMPORAL_ADAPTER=0
+
 # Resolution / temporal length for ACWM (1 obs + 16 targets = 17 frames → T_latent=5)
 TRAIN_HEIGHT=368
 TRAIN_WIDTH=640
@@ -179,6 +181,9 @@ fi
 OPTIONAL_ARGS+=(--log_every_n_steps "$LOG_EVERY_N_STEPS")
 if [ "${LOG_LOSS_TO_CSV:-0}" = "1" ]; then
     OPTIONAL_ARGS+=(--log_loss_to_csv)
+fi
+if [ "${ENABLE_TEMPORAL_ADAPTER:-0}" = "1" ]; then
+  OPTIONAL_ARGS+=(--enable_temporal_adapter)
 fi
 
 # ============================================================================
