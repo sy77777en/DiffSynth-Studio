@@ -64,6 +64,8 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
+from diffsynth.models.wan_video_dit import TemporalAttentionAdapter
+
 # ---------------------------------------------------------------------------
 # Path setup
 # ---------------------------------------------------------------------------
@@ -149,6 +151,18 @@ class ACWMv2TrainingModule(WanTrainingModule):
             extra_inputs = f"input_image,{extra_inputs}"
 
         super().__init__(*args, extra_inputs=extra_inputs, **kwargs)
+
+        if enable_temporal_adapter:
+        temporal_adapter_layers = [12, 16, 20]
+        for i, block in enumerate(self.pipe.dit.blocks):
+            if i in temporal_adapter_layers:
+                block.use_temporal_adapter = True
+                block.temporal_adapter = TemporalAttentionAdapter(
+                    dim=self.pipe.dit.dim,
+                    num_heads=block.num_heads,
+                )
+                for p in block.temporal_adapter.parameters():
+                    p.requires_grad = True
 
         self.use_masked_traj = use_masked_traj
 
