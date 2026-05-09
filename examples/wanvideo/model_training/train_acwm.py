@@ -180,7 +180,7 @@ class ACWMv2TrainingModule(WanTrainingModule):
             for block in self.pipe.dit.blocks:
                 block.use_temporal_adapter = False
         else:
-            for block inself.pipe.dit.blocks:
+            for block in self.pipe.dit.blocks:
                 if block.use_temporal_adapter:
                     for p in block.temporal_adapter.parameters():
                         p.requires_grad = True
