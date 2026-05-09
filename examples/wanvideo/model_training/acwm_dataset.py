@@ -92,8 +92,8 @@ class ACWMDataset(Dataset):
         }
 
         if "target_masked" in sample:
-            result["masked_traj] = [
-                self._load_image(p) for p in sample["masked_traj"][:16]
+            result["masked_traj"] = [
+                self._load_image(p) for p in sample["target_masked"][:16]
             ]
 
         return result
