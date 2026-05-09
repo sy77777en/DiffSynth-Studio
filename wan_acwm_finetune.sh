@@ -14,7 +14,7 @@ export TOKENIZERS_PARALLELISM=false
 # >>> EDIT THESE PATHS <<<
 # ============================================================================
 # Root of Wan2.2-TI2V-5B (contains diffusion shards, T5, VAE, google/umt5-xxl, …)
-MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan2.2-TI2V-5B"
+MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/models/Wan-AI/Wan2.2-TI2V-5B"
 
 DIFFSYNTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
