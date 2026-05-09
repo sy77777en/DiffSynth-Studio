@@ -47,7 +47,7 @@ ENABLE_TEMPORAL_ADAPTER=0   # 0=baseline, 1=enable temporal attention in DiT blo
 USE_MASKED_TRAJ=1            # 1=use masked traj visual condition, 0=obs-only
 
 # Resolution / frames — TI2V official LoRA example uses 480x832 x 49f; ACWM uses 17 f (1 obs + 16 targets).
-TRAIN_HEIGHT=368
+TRAIN_HEIGHT=384
 TRAIN_WIDTH=640
 TRAIN_NUM_FRAMES=17
 
