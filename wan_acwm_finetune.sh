@@ -19,7 +19,6 @@ MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/mode
 DIFFSYNTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 METADATA_JSON="${DIFFSYNTH_DIR}/subfolder_exp_split/train.json"
-ACWM_CONFIG="${DIFFSYNTH_DIR}/configs/action_conditioning.yaml"
 
 LORA_INIT_PATH=""
 ACTION_ENCODER_LR="1e-4"
@@ -32,7 +31,7 @@ ACTION_ENCODER_CKPT=""
 USE_FREEZE_ACTION_ENCODER=0
 
 # Hardware
-NUM_GPUS=4
+NUM_GPUS=1
 # Per-process gradient accumulation (effective optimizer steps scale with NUM_GPUS * GRAD_ACCUM)
 GRAD_ACCUM=2
 
@@ -42,6 +41,10 @@ LEARNING_RATE="1e-4"
 NUM_EPOCHS=10
 DATASET_REPEAT=2
 SAVE_STEPS=500
+
+# Feature toggles
+ENABLE_TEMPORAL_ADAPTER=0   # 0=baseline, 1=enable temporal attention in DiT blocks
+USE_MASKED_TRAJ=1            # 1=use masked traj visual condition, 0=obs-only
 
 # Resolution / frames — TI2V official LoRA example uses 480x832 x 49f; ACWM uses 17 f (1 obs + 16 targets).
 TRAIN_HEIGHT=368
@@ -68,6 +71,8 @@ echo "LoRA base:       $LORA_BASE_MODEL  (strip ckpt prefix: ${CKPT_PREFIX})"
 echo "Timestep:        [$MIN_TIMESTEP, $MAX_TIMESTEP]"
 echo "Frames:          ${TRAIN_NUM_FRAMES}  (${TRAIN_HEIGHT}x${TRAIN_WIDTH})"
 echo "GPUs:            $NUM_GPUS  grad_accum=$GRAD_ACCUM"
+echo "Temporal adapter: $ENABLE_TEMPORAL_ADAPTER"
+echo "Masked traj:      $USE_MASKED_TRAJ"
 echo "Output:          $OUTPUT_PATH"
 echo "========================================="
 
@@ -88,10 +93,6 @@ do
 done
 if [ ! -f "$METADATA_JSON" ]; then
   echo "Error: metadata not found: $METADATA_JSON"
-  exit 1
-fi
-if [ ! -f "$ACWM_CONFIG" ]; then
-  echo "Error: ACWM config not found: $ACWM_CONFIG"
   exit 1
 fi
 if [ -n "$LORA_INIT_PATH" ] && [ ! -f "$LORA_INIT_PATH" ]; then
@@ -146,11 +147,16 @@ fi
 if [ "${USE_FREEZE_ACTION_ENCODER:-0}" = "1" ]; then
   OPTIONAL_ARGS+=(--freeze_action_encoder)
 fi
+if [ "${ENABLE_TEMPORAL_ADAPTER:-0}" = "1" ]; then
+  OPTIONAL_ARGS+=(--enable_temporal_adapter)
+fi
+if [ "${USE_MASKED_TRAJ:-1}" = "0" ]; then
+  OPTIONAL_ARGS+=(--no_masked_traj)
+fi
 # Local tokenizer (recommended if MODEL_DIR contains google/umt5-xxl)
 if [ -d "${MODEL_DIR}/google/umt5-xxl" ]; then
   OPTIONAL_ARGS+=(--tokenizer_path "${MODEL_DIR}/google/umt5-xxl")
 elif [ -d "${MODEL_DIR}/google" ]; then
-  # Some snapshots only have google/ without deeper path; keep default tokenizer if unset.
   echo "[warn] No ${MODEL_DIR}/google/umt5-xxl — using built-in tokenizer_config from train.py."
 fi
 
@@ -167,7 +173,6 @@ accelerate launch \
   --num_frames "$TRAIN_NUM_FRAMES" \
   --dataset_repeat "$DATASET_REPEAT" \
   --model_paths "$MODEL_PATHS_JSON" \
-  --acwm_config "$ACWM_CONFIG" \
   --learning_rate "$LEARNING_RATE" \
   --num_epochs "$NUM_EPOCHS" \
   --save_steps "$SAVE_STEPS" \
