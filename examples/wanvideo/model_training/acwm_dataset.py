@@ -84,12 +84,19 @@ class ACWMDataset(Dataset):
         # video = observation + 16 target frames = 17 frames total
         video = [obs_img] + target_imgs
 
-        return {
+        result = {
             "video": video,
             "obs_image": obs_img,
             "actions": actions,
             "prompt": "",
         }
+
+        if "target_masked" in sample:
+            result["masked_traj] = [
+                self._load_image(p) for p in sample["masked_traj"][:16]
+            ]
+
+        return result
 
 
 # ======================================================================
