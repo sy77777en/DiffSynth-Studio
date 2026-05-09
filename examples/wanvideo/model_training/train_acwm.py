@@ -288,6 +288,12 @@ class ACWMv2TrainingModule(WanTrainingModule):
         inputs_shared["preencoded_action_tokens"] = action_tokens
 
         # --- 2. Encode visual condition (obs + masked_traj) ---
+        has_traj = "masked_traj" in data and data["masked_traj"] is not None
+        if not hasattr(self, '_logged_traj'):
+            print(f"[ACWM] use_masked_traj={self.use_masked_traj}, "
+                  f"data has masked_traj={has_traj}, "
+                  f"n_traj_frames={len(data['masked_traj']) if has_traj else 0}")
+            self._logged_traj = True
         inputs_shared = self._encode_visual_condition(data, inputs_shared)
 
         # --- 3. Run pipeline ---
