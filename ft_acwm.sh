@@ -35,6 +35,8 @@ NUM_EPOCHS=10
 DATASET_REPEAT=2
 SAVE_STEPS=500
 
+ENABLE_TEMPORAL_ADAPTER=0
+
 TRAIN_HEIGHT=368
 TRAIN_WIDTH=640
 TRAIN_NUM_FRAMES=17
@@ -141,6 +143,10 @@ fi
 
 if [ -d "${MODEL_DIR}/google/umt5-xxl" ]; then
   OPTIONAL_ARGS+=(--tokenizer_path "${MODEL_DIR}/google/umt5-xxl")
+fi
+
+if [ "${ENABLE_TEMPORAL_ADAPTER:-0}" = "1" ]; then
+  OPTIONAL_ARGS+=(--enable_temporal_adapter)
 fi
 
 cd "$DIFFSYNTH_DIR"
