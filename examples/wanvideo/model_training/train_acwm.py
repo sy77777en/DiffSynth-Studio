@@ -99,7 +99,7 @@ class ActionFFNEncoder(nn.Module):
     Output tokens replace the text context in DiT cross-attention.
     """
 
-    def __init__(self, action_dim: int, embed_dim: int, num_layers: int = 2):
+    def __init__(self, action_dim: int, embed_dim: int, num_layers: int = 2, max_timesteps: int = 16):
         super().__init__()
         layers: list[nn.Module] = [nn.Linear(action_dim, embed_dim), nn.GELU()]
         for _ in range(max(0, num_layers - 2)):
@@ -107,8 +107,24 @@ class ActionFFNEncoder(nn.Module):
         self.mlp = nn.Sequential(*layers)
         self.norm = nn.LayerNorm(embed_dim)
 
+        pe = self._sinusoidal_pe(max_timesteps, embed_dim)
+        self.temporal_pe = nn.Parameter(pe)  # (max_timesteps, embed_dim)
+
+    @staticmethod
+    def _sinusoidal_pe(length: int, dim: int) -> torch.Tensor:
+        pos = torch.arange(length).unsqueeze(1).float()
+        div = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
+        pe = torch.zeros(length, dim)
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        return pe
+  
     def forward(self, actions: torch.Tensor) -> torch.Tensor:
-        return self.norm(self.mlp(actions))
+        # return self.norm(self.mlp(actions))
+        x = self.mlp(actions)
+        T = actions.shape[1]
+        x = x + self.temporal_pe[:T].to(x.dtype, x.device)
+        return self.norm(x)
 
 
 # ============================================================================
