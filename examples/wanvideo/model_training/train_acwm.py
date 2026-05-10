@@ -58,7 +58,7 @@ import csv
 import json
 import os
 import sys
-
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -123,7 +123,7 @@ class ActionFFNEncoder(nn.Module):
         # return self.norm(self.mlp(actions))
         x = self.mlp(actions)
         T = actions.shape[1]
-        x = x + self.temporal_pe[:T].to(x.dtype, x.device)
+        x = x + self.temporal_pe[:T].to(dtype=x.dtype, device=x.device)
         return self.norm(x)
 
 
