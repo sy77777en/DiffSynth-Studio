@@ -44,6 +44,7 @@ SAVE_STEPS=2962
 
 # Feature toggles
 ENABLE_TEMPORAL_ADAPTER=0    # 0=baseline, 1=enable temporal attention in DiT blocks
+ENABLE_FRAMEWISE_CROSS_ATTN=0   # 0=disable, 1=enable framewise cross-attention
 USE_MASKED_TRAJ=1            # 1=use masked traj visual condition, 0=obs-only
 
 # Resolution / frames — TI2V official LoRA example uses 480x832 x 49f; ACWM uses 17 f (1 obs + 16 targets).
@@ -71,6 +72,7 @@ echo "LoRA base:       $LORA_BASE_MODEL  (strip ckpt prefix: ${CKPT_PREFIX})"
 echo "Timestep:        [$MIN_TIMESTEP, $MAX_TIMESTEP]"
 echo "Frames:          ${TRAIN_NUM_FRAMES}  (${TRAIN_HEIGHT}x${TRAIN_WIDTH})"
 echo "GPUs:            $NUM_GPUS  grad_accum=$GRAD_ACCUM"
+echo "Framewise cross-attn: $ENABLE_FRAMEWISE_CROSS_ATTN"
 echo "Temporal adapter: $ENABLE_TEMPORAL_ADAPTER"
 echo "Masked traj:      $USE_MASKED_TRAJ"
 echo "Output:          $OUTPUT_PATH"
@@ -153,6 +155,10 @@ fi
 if [ "${USE_MASKED_TRAJ:-1}" = "0" ]; then
   OPTIONAL_ARGS+=(--no_masked_traj)
 fi
+if [ "${ENABLE_FRAMEWISE_CROSS_ATTN:-0}" = "1" ]; then
+  OPTIONAL_ARGS+=(--enable_framewise_cross_attn)
+fi
+
 # Local tokenizer (recommended if MODEL_DIR contains google/umt5-xxl)
 if [ -d "${MODEL_DIR}/google/umt5-xxl" ]; then
   OPTIONAL_ARGS+=(--tokenizer_path "${MODEL_DIR}/google/umt5-xxl")
