@@ -1479,6 +1479,26 @@ def model_fn_wan_video(
         dit.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
     ], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
 
+    # Build per-frame action context from flat action tokens
+    if action_context is None and preencoded_action_tokens is not None:
+        act = preencoded_action_tokens.to(dtype=x.dtype, device=x.device)
+        ctx_dim = x.shape[-1]
+        if act.shape[-1] < ctx_dim:
+            pad = torch.zeros((*act.shape[:-1], ctx_dim - act.shape[-1]),
+                              dtype=act.dtype, device=act.device)
+            act = torch.cat([act, pad], dim=-1)
+        elif act.shape[-1] > ctx_dim:
+            act = act[..., :ctx_dim]
+
+        B_act = act.shape[0]
+        n_target = f - 1  # latent frames excluding obs
+        a_per_frame = act.shape[1] // n_target  # 16 // 4 = 4
+
+        act_grouped = act.view(B_act, n_target, a_per_frame, -1)
+        obs_pad = torch.zeros(B_act, 1, a_per_frame, act_grouped.shape[-1],
+                              dtype=act_grouped.dtype, device=act_grouped.device)
+        action_context = torch.cat([obs_pad, act_grouped], dim=1)  # (B, f, 4, dim)
+    
     # VAP 
     if vap is not None:
         # hidden state
@@ -1607,7 +1627,7 @@ def model_fn_wan_video(
                     block,
                     use_gradient_checkpointing,
                     use_gradient_checkpointing_offload,
-                    x, context, t_mod, freqs, (f, h, w)
+                    x, context, t_mod, freqs, (f, h, w), action_context
                 )
               
             
