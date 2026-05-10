@@ -64,7 +64,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from diffsynth.models.wan_video_dit import TemporalAttentionAdapter
+from diffsynth.models.wan_video_dit import TemporalAttentionAdapter, FramewiseCrossAttention
 
 # ---------------------------------------------------------------------------
 # Path setup
@@ -200,6 +200,18 @@ class ACWMv2TrainingModule(WanTrainingModule):
                 if block.use_temporal_adapter:
                     for p in block.temporal_adapter.parameters():
                         p.requires_grad = True
+
+        # Attach framewise cross-attention to each DiT block
+        for block in self.pipe.dit.blocks:
+            block.framewise_cross_attn = FramewiseCrossAttention(
+                dim=self.pipe.dit.dim,
+                num_heads=block.num_heads,
+            ).to(device=self.pipe.device, dtype=self.pipe.torch_dtype)
+            for p in block.framewise_cross_attn.parameters():
+                p.requires_grad = True
+            # freeze original cross_attn (loaded but unused)
+            for p in block.cross_attn.parameters():
+                p.requires_grad = False
 
     def _encode_visual_condition(self, data: dict, inputs_shared: dict) -> dict:
         """Encode obs + masked_traj into the visual condition (y).
