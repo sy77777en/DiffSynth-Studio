@@ -18,7 +18,7 @@ MODEL_DIR="/net/holy-isilon/ifs/rc_labs/ydu_lab/sycen/code/DiffSynth-Studio/mode
 
 DIFFSYNTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-METADATA_JSON="${DIFFSYNTH_DIR}/subfolder_exp_split/train.json"
+METADATA_JSON="${DIFFSYNTH_DIR}/subfolder_exp_split_2/train.json"
 
 LORA_INIT_PATH=""
 ACTION_ENCODER_LR="1e-4"
@@ -40,10 +40,10 @@ LORA_RANK=16
 LEARNING_RATE="1e-4"
 NUM_EPOCHS=10
 DATASET_REPEAT=2
-SAVE_STEPS=500
+SAVE_STEPS=2962
 
 # Feature toggles
-ENABLE_TEMPORAL_ADAPTER=0   # 0=baseline, 1=enable temporal attention in DiT blocks
+ENABLE_TEMPORAL_ADAPTER=0    # 0=baseline, 1=enable temporal attention in DiT blocks
 USE_MASKED_TRAJ=1            # 1=use masked traj visual condition, 0=obs-only
 
 # Resolution / frames — TI2V official LoRA example uses 480x832 x 49f; ACWM uses 17 f (1 obs + 16 targets).
@@ -59,7 +59,7 @@ CKPT_PREFIX="pipe.dit."
 # ============================================================================
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-TRAIN_TAG="acwm_ti2v5b_4gpu"
+TRAIN_TAG=""
 OUTPUT_PATH="${DIFFSYNTH_DIR}/outputs/acwm_ti2v5b_${TRAIN_TAG}_${TIMESTAMP}"
 mkdir -p "$OUTPUT_PATH"
 
