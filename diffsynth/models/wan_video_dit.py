@@ -201,6 +201,61 @@ class CrossAttention(nn.Module):
         return self.o(x)
 
 
+class FramewiseCrossAttention(nn.Module):
+    """Per-frame cross-attention: each latent frame's spatial tokens
+    attend only to their corresponding action tokens.
+
+    Input:
+        x:              (B, f*h*w, dim)   — visual tokens from self-attn
+        action_context: (B, f, A, dim)    — per-frame action tokens
+                                            A = num action tokens per frame
+        grid_size:      (f, h, w)
+
+    Output:
+        (B, f*h*w, dim)
+    """
+
+    def __init__(self, dim: int, num_heads: int, eps: float = 1e-6):
+        super().__init__()
+        self.num_heads = num_heads
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.o = nn.Linear(dim, dim)
+        self.norm_q = RMSNorm(dim, eps=eps)
+        self.norm_k = RMSNorm(dim, eps=eps)
+        self.attn = AttentionModule(num_heads)
+
+        # zero-init output projection so insertion is safe
+        nn.init.zeros_(self.o.weight)
+        nn.init.zeros_(self.o.bias)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        action_context: torch.Tensor,
+        grid_size: tuple[int, int, int],
+    ) -> torch.Tensor:
+        f, h, w = grid_size
+        B = x.shape[0]
+        A = action_context.shape[2]  # actions per frame
+
+        # (B, f*h*w, dim) -> (B*f, h*w, dim)
+        x_per_frame = x.view(B, f, h * w, -1).reshape(B * f, h * w, -1)
+
+        # (B, f, A, dim) -> (B*f, A, dim)
+        act_per_frame = action_context.reshape(B * f, A, -1)
+
+        q = self.norm_q(self.q(x_per_frame))
+        k = self.norm_k(self.k(act_per_frame))
+        v = self.v(act_per_frame)
+
+        out = self.attn(q, k, v)  # (B*f, h*w, dim)
+        out = self.o(out)
+
+        return out.view(B, f * h * w, -1)
+
+
 class TemporalAttentionAdapter(nn.Module):
     def __init__(self, dim: int, num_heads: int, eps: float = 1e-6, init_scale: float = 0.0):
         super().__init__()
@@ -274,7 +329,7 @@ class DiTBlock(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
         self.gate = GateModule()
 
-    def forward(self, x, context, t_mod, freqs, grid_size=None):
+    def forward(self, x, context, t_mod, freqs, grid_size=None, action_context=None):
         has_seq = len(t_mod.shape) == 4
         chunk_dim = 2 if has_seq else 1
         # msa: multi-head self-attention  mlp: multi-layer perceptron
@@ -293,7 +348,12 @@ class DiTBlock(nn.Module):
             f, h, w = grid_size
             x = self.temporal_adapter(x, f, h, w)
         
-        x = x + self.cross_attn(self.norm3(x), context)
+        # x = x + self.cross_attn(self.norm3(x), context)
+        if hasattr(self, 'framewise_cross_attn') and action_context is not None:
+            x = x + self.framewise_cross_attn(self.norm3(x), action_context, grid_size)
+        else:
+            x = x + self.cross_attn(self.norm3(x), context)
+        
         input_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = self.gate(x, gate_mlp, self.ffn(input_x))
         return x
