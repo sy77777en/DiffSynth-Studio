@@ -1425,6 +1425,7 @@ def model_fn_wan_video(
     if clip_feature is not None and dit.require_clip_embedding:
         clip_embdding = dit.img_emb(clip_feature)
         context = torch.cat([clip_embdding, context], dim=1)
+    action_context = None
     if preencoded_action_tokens is not None:
         action_tokens = preencoded_action_tokens.to(dtype=context.dtype, device=context.device)
         ctx_dim = context.shape[-1]
