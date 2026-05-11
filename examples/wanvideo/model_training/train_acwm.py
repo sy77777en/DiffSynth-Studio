@@ -422,6 +422,14 @@ def launch_acwm_training_task(
             with accelerator.accumulate(model):
                 loss = model({}, inputs=data) if load_from_cache else model(data)
                 accelerator.backward(loss)
+              
+                grad_norm = None
+                if accelerator.sync_gradients:
+                    total_grad_norm = accelerator.clip_grad_norm_(
+                        [p for p in model.parameters() if p.requires_grad],
+                        max_norm=1e9,   # effectively no clipping
+                    )
+              
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -440,10 +448,17 @@ def launch_acwm_training_task(
                     lv.item() if isinstance(lv, torch.Tensor) else float(lv)
                 )
                 if accelerator.is_main_process:
-                    tqdm.write(
+                    msg = (
                         f"[train] epoch={epoch_id} step={global_step} "
                         f"loss={loss_val:.6f}"
                     )
+                    if grad_norm is not None:
+                        msg += f" grad_norm={float(grad_norm):.6f}"
+                    tqdm.write(msg)
+                    # tqdm.write(
+                    #     f"[train] epoch={epoch_id} step={global_step} "
+                    #     f"loss={loss_val:.6f}"
+                    # )
                     if log_csv_path is not None:
                         with open(log_csv_path, "a", newline="") as f:
                             csv.writer(f).writerow(
