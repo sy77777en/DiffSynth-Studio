@@ -369,7 +369,37 @@ class ACWMv2TrainingModule(WanTrainingModule):
             self._logged_traj = True
         inputs_shared = self._encode_visual_condition(data, inputs_shared)
 
-        # --- 3. Run pipeline ---
+        # --- 3. Encode training GT with history ---
+        has_history = "history_frames" in data and data["history_frames"] is not None
+        if has_history:
+            self.pipe.load_models_to_device(["vae"])
+            height, width = inputs_shared["height"], inputs_shared["width"]
+            obs_img = data["obs_image"]
+    
+            history_frames = data["history_frames"]
+            if len(history_frames) == 0:
+                history_frames = [obs_img] * 4
+            elif len(history_frames) > 4:
+                history_frames = history_frames[-4:]
+            elif 0 < len(history_frames) < 4:
+                history_frames = history_frames + [history_frames[-1]] * (4 - len(history_frames))
+    
+            history_tensors = []
+            for img in history_frames:
+                if img.size != (width, height):
+                    img = img.resize((width, height), Image.LANCZOS)
+                arr = np.array(img, dtype=np.float32)
+                t = torch.from_numpy(arr).permute(2, 0, 1) / 255.0 * 2.0 - 1.0
+                history_tensors.append(t)
+            history_video = torch.stack(history_tensors, dim=1).to(dtype=dtype, device=device)
+    
+            history_gt_latent = self.pipe.vae.encode(
+                [history_video], device=device
+            )  # (1, C, 1, H', W')
+  
+          inputs_shared["_history_gt_latent"] = history_gt_latent
+
+        # --- 4. Run pipeline ---
         # Remaining units handle:
         #   PromptEmbedder:     T5("") -> context (replaced by action_tokens in model_fn)
         #   InputVideoEmbedder: VAE(video) -> input_latents + noise
@@ -381,6 +411,31 @@ class ACWMv2TrainingModule(WanTrainingModule):
         inputs = (inputs_shared, inputs_posi, inputs_nega)
         for unit in self.pipe.units:
             inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
+
+        # --- 5. Prepend history to GT and noisy latents ---
+        inputs_shared = inputs[0]
+        if "_history_gt_latent" in inputs_shared:
+            history_gt = inputs_shared.pop("_history_gt_latent").to(
+                dtype=inputs_shared["input_latents"].dtype,
+                device=inputs_shared["input_latents"].device,
+            )
+            # input_latents: (1, C, 5, H', W') -> (1, C, 6, H', W')
+            inputs_shared["input_latents"] = torch.cat(
+                [history_gt, inputs_shared["input_latents"]], dim=2
+            )
+            # latents (noisy): also prepend noisy history
+            history_noise = self.pipe.generate_noise(
+                history_gt.shape,
+                seed=inputs_shared.get("seed"),
+                rand_device=inputs_shared.get("rand_device", "cpu"),
+            )
+            history_noisy = self.pipe.scheduler.add_noise(
+                history_gt, history_noise,
+                timestep=self.pipe.scheduler.timesteps[0],
+            )
+            inputs_shared["latents"] = torch.cat(
+                [history_noisy, inputs_shared["latents"]], dim=2
+            )
         loss = self.task_to_loss[self.task](self.pipe, *inputs)
         return loss
 
