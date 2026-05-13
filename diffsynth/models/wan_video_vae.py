@@ -1313,6 +1313,17 @@ class WanVideoVAE(nn.Module):
         video = torch.concat(video, dim=2)
         return video
 
+    def decode_segments(self, hidden_states, device, segment_configs):
+        hidden_states = [h.to("cpu") for h in hidden_states]
+        videos = []
+        for hidden_state in hidden_states:
+            hidden_state = hidden_state.unsqueeze(0).to(device)
+            video = self.model.decode_segments(hidden_state, self.scale, segment_configs)
+            video = video.clamp_(-1, 1).squeeze(0).cpu()
+            videos.append(video)
+        videos = torch.stack(videos)
+        return videos
+
 
     @staticmethod
     def state_dict_converter():
