@@ -1046,6 +1046,43 @@ class VideoVAE_(nn.Module):
                 out = torch.cat([out, out_], 2) # may add tensor offload
         return out
     
+    def decode_segments(self, z, scale, segment_configs):
+        """
+        segment_configs: list of (start, end, first_frame_single)
+        """
+        self.clear_cache()
+        if isinstance(scale[0], torch.Tensor):
+            scale = [s.to(dtype=z.dtype, device=z.device) for s in scale]
+            z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
+                1, self.z_dim, 1, 1, 1)
+        else:
+            scale = scale.to(dtype=z.dtype, device=z.device)
+            z = z / scale[1] + scale[0]
+    
+        x = self.conv2(z)
+    
+        all_segments = []
+        for start, end, first_frame_single in segment_configs:
+            self.clear_cache()
+            chunks = []
+            for i in range(start, end):
+                self._conv_idx = [0]
+                if i == start and first_frame_single:
+                    out_, self._feat_map, self._conv_idx = self.decoder(
+                        x[:, :, i:i+1, :, :],
+                        feat_cache=self._feat_map,
+                        feat_idx=self._conv_idx)
+                else:
+                    out_, self._feat_map, self._conv_idx = self.decoder(
+                        x[:, :, i:i+1, :, :],
+                        feat_cache=self._feat_map,
+                        feat_idx=self._conv_idx)
+                chunks.append(out_)
+            segment_out = torch.cat(chunks, 2)
+            all_segments.append(segment_out)
+    
+        out = torch.cat(all_segments, 2)
+        return out
 
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
@@ -1388,6 +1425,41 @@ class VideoVAE38_(VideoVAE_):
                                     feat_cache=self._feat_map,
                                     feat_idx=self._conv_idx)
                 out = torch.cat([out, out_], 2)
+        out = unpatchify(out, patch_size=2)
+        self.clear_cache()
+        return out
+
+    def decode_segments(self, z, scale, segment_configs):
+        """
+        segment_configs: list of (start, end, first_frame_single)
+        """
+        self.clear_cache()
+        if isinstance(scale[0], torch.Tensor):
+            scale = [s.to(dtype=z.dtype, device=z.device) for s in scale]
+            z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
+                1, self.z_dim, 1, 1, 1)
+        else:
+            scale = scale.to(dtype=z.dtype, device=z.device)
+            z = z / scale[1] + scale[0]
+    
+        x = self.conv2(z)
+    
+        all_segments = []
+        for start, end, first_frame_single in segment_configs:
+            self.clear_cache()
+            chunks = []
+            for i in range(start, end):
+                self._conv_idx = [0]
+                out_, self._feat_map, self._conv_idx = self.decoder(
+                    x[:, :, i:i+1, :, :],
+                    feat_cache=self._feat_map,
+                    feat_idx=self._conv_idx,
+                    first_chunk=(first_frame_single and i == start))
+                chunks.append(out_)
+            segment_out = torch.cat(chunks, 2)
+            all_segments.append(segment_out)
+    
+        out = torch.cat(all_segments, 2)
         out = unpatchify(out, patch_size=2)
         self.clear_cache()
         return out
