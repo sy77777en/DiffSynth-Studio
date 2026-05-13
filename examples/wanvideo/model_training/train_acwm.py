@@ -244,6 +244,17 @@ class ACWMv2TrainingModule(WanTrainingModule):
         obs_img = data["obs_image"]
         traj_imgs = data["masked_traj"]
 
+        if "history_frames" in data and data["history_frames"] is not None:
+            history_frames = data["history_frames"]
+            if len(history_frames) == 0:
+                history_frames = [obs_img] * 4
+            elif len(history_frames) > 4:
+                history_frames = history_frames[-4:]
+            elif 0 < len(history_frames) < 4:
+                history_frames = history_frames + [history_frames[-1]] * (4 - len(history_frames))
+        else:
+            history_frames = [obs_img] * 4
+
         # Preprocess to tensor: list of PIL -> (3, T, H, W) in [-1, 1]
         all_frames = [obs_img] + traj_imgs
         frame_tensors = []
