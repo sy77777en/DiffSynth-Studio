@@ -987,19 +987,30 @@ class VideoVAE_(nn.Module):
         self.clear_cache()
         ## cache
         t = x.shape[2]
-        iter_ = 1 + (t - 1) // 4
 
-        for i in range(iter_):
-            self._enc_conv_idx = [0]
-            if i == 0:
-                out, self._enc_feat_map, self._enc_conv_idx = self.encoder(x[:, :, :1, :, :],
-                                   feat_cache=self._enc_feat_map,
-                                   feat_idx=self._enc_conv_idx)
-            else:
-                out_, self._enc_feat_map, self._enc_conv_idx = self.encoder(x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
-                                    feat_cache=self._enc_feat_map,
-                                    feat_idx=self._enc_conv_idx)
-                out = torch.cat([out, out_], 2)
+        if t % 4 == 0:
+            iter_ = t // 4
+            chunks = []
+            for i in range(iter_):
+                self._enc_conv_idx = [0]
+                chunk = x[:, :, 4*i:4*(i+1), :, :]
+                out_, self._enc_feat_map, self._enc_conv_idx = self.encoder(
+                    chunk, feat_cache=self._enc_feat_map, feat_idx=self._enc_conv_idx)
+                chunks.append(out_)
+            out = torch.cat(chunks, 2)
+        else:
+            iter_ = 1 + (t - 1) // 4
+            for i in range(iter_):
+                self._enc_conv_idx = [0]
+                if i == 0:
+                    out, self._enc_feat_map, self._enc_conv_idx = self.encoder(x[:, :, :1, :, :],
+                                       feat_cache=self._enc_feat_map,
+                                       feat_idx=self._enc_conv_idx)
+                else:
+                    out_, self._enc_feat_map, self._enc_conv_idx = self.encoder(x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
+                                        feat_cache=self._enc_feat_map,
+                                        feat_idx=self._enc_conv_idx)
+                    out = torch.cat([out, out_], 2)
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
             scale = [s.to(dtype=mu.dtype, device=mu.device) for s in scale]
@@ -1034,6 +1045,7 @@ class VideoVAE_(nn.Module):
                                     feat_idx=self._conv_idx)
                 out = torch.cat([out, out_], 2) # may add tensor offload
         return out
+    
 
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
@@ -1317,18 +1329,30 @@ class VideoVAE38_(VideoVAE_):
         self.clear_cache()
         x = patchify(x, patch_size=2)
         t = x.shape[2]
-        iter_ = 1 + (t - 1) // 4
-        for i in range(iter_):
-            self._enc_conv_idx = [0]
-            if i == 0:
-                out, self._enc_feat_map, self._enc_conv_idx = self.encoder(x[:, :, :1, :, :],
-                                   feat_cache=self._enc_feat_map,
-                                   feat_idx=self._enc_conv_idx)
-            else:
-                out_, self._enc_feat_map, self._enc_conv_idx = self.encoder(x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
-                                    feat_cache=self._enc_feat_map,
-                                    feat_idx=self._enc_conv_idx)
-                out = torch.cat([out, out_], 2)
+
+        if t % 4 == 0:
+            iter_ = t // 4
+            chunks = []
+            for i in range(iter_):
+                self._enc_conv_idx = [0]
+                chunk = x[:, :, 4*i:4*(i+1), :, :]
+                out_, self._enc_feat_map, self._enc_conv_idx = self.encoder(
+                    chunk, feat_cache=self._enc_feat_map, feat_idx=self._enc_conv_idx)
+                chunks.append(out_)
+            out = torch.cat(chunks, 2)
+        else:
+            iter_ = 1 + (t - 1) // 4
+            for i in range(iter_):
+                self._enc_conv_idx = [0]
+                if i == 0:
+                    out, self._enc_feat_map, self._enc_conv_idx = self.encoder(x[:, :, :1, :, :],
+                                       feat_cache=self._enc_feat_map,
+                                       feat_idx=self._enc_conv_idx)
+                else:
+                    out_, self._enc_feat_map, self._enc_conv_idx = self.encoder(x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
+                                        feat_cache=self._enc_feat_map,
+                                        feat_idx=self._enc_conv_idx)
+                    out = torch.cat([out, out_], 2)
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
             scale = [s.to(dtype=mu.dtype, device=mu.device) for s in scale]
