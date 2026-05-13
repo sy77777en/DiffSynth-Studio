@@ -304,21 +304,37 @@ class ACWMv2TrainingModule(WanTrainingModule):
         # The obs frame (t=0) is always a real condition
         T_lat = y.shape[1]
         H_lat, W_lat = y.shape[2], y.shape[3]
-        n_real_frames = 4 + 1 + len(traj_imgs)  # history + obs + traj frames
-        # How many latent frames correspond to real condition frames
-        n_real_lat = (n_real_frames - 1) // 4 + 1
-        n_real_lat = min(n_real_lat, T_lat)
 
-        msk = torch.zeros(1, 4 + num_frames, H_lat, W_lat, device=device)
-        msk[:, :n_real_frames] = 1  # mark real frames
+        history_msk = torch.ones(4, 1, H_lat, W_lat, device=device)
+        obs_future_msk = torch.zeros(1, num_frames, H_lat, W_lat, device=device)
+        obs_future_msk[:, :1 + len(traj_imgs)] = 1
 
-        # Reshape mask to latent temporal resolution (same as ImageEmbedderVAE)
-        msk = torch.cat(
-            [torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]],
+        obs_future_msk = torch.cat(
+            [torch.repeat_interleave(obs_future_msk[:, 0:1], repeats=4, dim=1), obs_future_msk[:, 1:]],
             dim=1,
         )
-        msk = msk.view(1, msk.shape[1] // 4, 4, H_lat, W_lat)
-        msk = msk.transpose(1, 2)[0]  # (4, T_lat, H', W')
+        obs_future_msk = obs_future_msk.view(1, obs_future_msk.shape[1] // 4, 4, H_lat, W_lat)
+        obs_future_msk = obs_future_msk.transpose(1, 2)[0]  # (4, T_lat_obs_future, H', W')
+
+        # Concat along time
+        msk = torch.cat([history_msk, obs_future_msk], dim=1)  # (4, T_lat, H', W')
+
+      
+        # n_real_frames = 4 + 1 + len(traj_imgs)  # history + obs + traj frames
+        # # How many latent frames correspond to real condition frames
+        # n_real_lat = (n_real_frames - 1) // 4 + 1
+        # n_real_lat = min(n_real_lat, T_lat)
+
+        # msk = torch.zeros(1, 4 + num_frames, H_lat, W_lat, device=device)
+        # msk[:, :n_real_frames] = 1  # mark real frames
+
+        # # Reshape mask to latent temporal resolution (same as ImageEmbedderVAE)
+        # msk = torch.cat(
+        #     [torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]],
+        #     dim=1,
+        # )
+        # msk = msk.view(1, msk.shape[1] // 4, 4, H_lat, W_lat)
+        # msk = msk.transpose(1, 2)[0]  # (4, T_lat, H', W')
 
         # y = [mask (4ch) | latent (16ch)]
         y = torch.cat([msk, y])  # (20, T_lat, H', W')
