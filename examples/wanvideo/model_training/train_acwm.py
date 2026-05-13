@@ -222,6 +222,7 @@ class ACWMv2TrainingModule(WanTrainingModule):
           y = [4ch mask | 16ch VAE latent]  shape (1, 20, T_lat, H', W')
 
         where the VAE latent is:
+          - history frames (prev 4 frames)
           - obs frame at t=0 (from obs_image)
           - masked_traj frames for t>0 (future trajectory visualization)
           - zero-padded to match noisy_latent temporal length
@@ -255,6 +256,15 @@ class ACWMv2TrainingModule(WanTrainingModule):
         else:
             history_frames = [obs_img] * 4
 
+        history_tensors = []
+        for img in history_frames:
+            if img.size != (width, height):
+                img = img.resize((width, height), Image.LANCZOS)
+            arr = np.array(img, dtype=np.float32)
+            t = torch.from_numpy(arr).permute(2, 0, 1) / 255.0 * 2.0 - 1.0
+            history_tensors.append(t)
+        history_video = torch.stack(history_tensors, dim=1)  # (3, 4, H, W)
+
         # Preprocess to tensor: list of PIL -> (3, T, H, W) in [-1, 1]
         all_frames = [obs_img] + traj_imgs
         frame_tensors = []
@@ -277,23 +287,29 @@ class ACWMv2TrainingModule(WanTrainingModule):
 
         # VAE encode the condition video
         self.pipe.load_models_to_device(["vae"])
+        history_video = history_video.to(dtype=dtype, device=device)
         cond_video = cond_video.to(dtype=dtype, device=device)
+        # vae.encode expects list of (3, 4, H, W)
+        history_latent = self.pipe.vae.encode(
+          [history_video], device=device,
+        )[0]
         # vae.encode expects list of (3, T, H, W)
         y = self.pipe.vae.encode(
             [cond_video], device=device,
         )[0]  # (C, T_lat, H', W')
+        y = torch.cat([history_latent, y], dim=1)
         y = y.to(dtype=dtype, device=device)
 
         # Build 4-channel mask: 1 where we have real condition, 0 elsewhere
         # The obs frame (t=0) is always a real condition
         T_lat = y.shape[1]
         H_lat, W_lat = y.shape[2], y.shape[3]
-        n_real_frames = 1 + len(traj_imgs)  # obs + traj frames
+        n_real_frames = 4 + 1 + len(traj_imgs)  # history + obs + traj frames
         # How many latent frames correspond to real condition frames
         n_real_lat = (n_real_frames - 1) // 4 + 1
         n_real_lat = min(n_real_lat, T_lat)
 
-        msk = torch.zeros(1, num_frames, H_lat, W_lat, device=device)
+        msk = torch.zeros(1, 4 + num_frames, H_lat, W_lat, device=device)
         msk[:, :n_real_frames] = 1  # mark real frames
 
         # Reshape mask to latent temporal resolution (same as ImageEmbedderVAE)
