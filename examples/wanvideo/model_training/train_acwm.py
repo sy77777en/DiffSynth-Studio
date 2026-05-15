@@ -396,12 +396,14 @@ class ACWMv2TrainingModule(WanTrainingModule):
                 t = torch.from_numpy(arr).permute(2, 0, 1) / 255.0 * 2.0 - 1.0
                 history_tensors.append(t)
             history_video = torch.stack(history_tensors, dim=1).to(dtype=dtype, device=device)
-    
+
+            history_5f = torch.cat([history_video[:, :1], history_video], dim=1)
             history_gt_latent = self.pipe.vae.encode(
-                [history_video], device=device
+                [history_5f], device=device
             )  # (1, C, 1, H', W')
+            histroy_gt_latent = history_gt_latent[:, :, 1:2]
   
-          inputs_shared["_history_gt_latent"] = history_gt_latent
+            inputs_shared["_history_gt_latent"] = history_gt_latent
 
         # --- 4. Run pipeline ---
         # Remaining units handle:
