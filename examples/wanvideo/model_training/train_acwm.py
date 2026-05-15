@@ -401,7 +401,7 @@ class ACWMv2TrainingModule(WanTrainingModule):
             history_gt_latent = self.pipe.vae.encode(
                 [history_5f], device=device
             )  # (1, C, 1, H', W')
-            histroy_gt_latent = history_gt_latent[:, :, 1:2]
+            history_gt_latent = history_gt_latent[:, :, 1:2]
   
             inputs_shared["_history_gt_latent"] = history_gt_latent
 
