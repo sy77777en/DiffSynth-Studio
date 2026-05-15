@@ -289,10 +289,14 @@ class ACWMv2TrainingModule(WanTrainingModule):
         self.pipe.load_models_to_device(["vae"])
         history_video = history_video.to(dtype=dtype, device=device)
         cond_video = cond_video.to(dtype=dtype, device=device)
-        # vae.encode expects list of (3, 4, H, W)
+      
+        # vae.encode expects list of (3, 5, H, W)
+        history_5f = torch.cat([history_video[:, :1], history_video], dim=1)  # (3, 5, H, W)
         history_latent = self.pipe.vae.encode(
-          [history_video], device=device,
-        )[0]
+            [history_5f], device=device,
+        )[0]  # (48, 2, H', W')
+        history_latent = history_latent[:, 1:2]  # (48, 1, H', W')
+      
         # vae.encode expects list of (3, T, H, W)
         y = self.pipe.vae.encode(
             [cond_video], device=device,
